@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from urllib.parse import quote_plus
 from keyword_extractor import JobRequirements
+from title_extractor import resolve_safe_title
 
 
 @dataclass
@@ -75,19 +76,15 @@ class SearchEnginePlanner:
         """Constructs Strategies A through G tailored to the job requirements."""
         from talent_pool_mapper import talent_pool_mapper, ROLE_FAMILY_AI_GENERALIST_OPERATIONS
 
-        primary_title = requirements.job_title.strip() or "Software Engineer"
+        fallback_role = "AI Generalist" if any(
+            kw in " ".join(requirements.required_skills + requirements.preferred_skills).lower()
+            for kw in ["chatgpt", "ai", "evaluation", "annotation", "generalist", "documentation", "prompt"]
+        ) else "Software Engineer"
 
-        # Safety guard: if the title is a known bad placeholder (user save name leaked through),
-        # replace it with the role-appropriate default rather than building broken queries.
-        _BAD_TITLE_PLACEHOLDERS = {
-            "new job", "candidate search", "search candidates",
-            "job title", "untitled", "test job", "test", "job",
-        }
-        if primary_title.lower() in _BAD_TITLE_PLACEHOLDERS:
-            primary_title = "AI Generalist" if any(
-                kw in " ".join(requirements.required_skills).lower()
-                for kw in ["chatgpt", "ai", "evaluation", "annotation", "generalist"]
-            ) else "Software Engineer"
+        primary_title = resolve_safe_title(
+            requirements.job_title,
+            fallback=fallback_role,
+        )
 
         # Determine role family if not provided
         if not role_family:

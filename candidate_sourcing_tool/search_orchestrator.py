@@ -41,6 +41,7 @@ from groq_reasoning import (
 from talent_pool_mapper import talent_pool_mapper
 from search_engine_planner import search_engine_planner
 from groq_browser_connector import is_valid_candidate_url
+from title_extractor import resolve_safe_title
 
 
 def is_valid_candidate_lead(url: str, name: str = "Lead Profile", evidence_text: str | None = None) -> bool:
@@ -57,6 +58,48 @@ def is_valid_candidate_lead(url: str, name: str = "Lead Profile", evidence_text:
         if len(evidence_text.strip()) < 15 or evidence_text.strip().lower() in ["n/a", "none", "unknown", "evidence"]:
             return False
     return is_valid_candidate_url(url)
+
+
+def compute_run_final_status(
+    total_saved: int,
+    strategy_issues: list[str],
+    sources_with_error: list[str],
+    active_sources: list[str],
+    connectors_succeeded: int,
+    low_relevance_excluded: int = 0,
+    sourced_stage_count: int = 0,
+    duration: float = 0.0,
+) -> tuple[str, str]:
+    """Computes the authoritative run final status (PARTIAL, FAILED, COMPLETED) and human-readable stage summary."""
+    all_connectors_errored = (
+        len(active_sources) > 0
+        and connectors_succeeded == 0
+        and len(sources_with_error) >= len(active_sources)
+    )
+
+    if total_saved > 0 and (strategy_issues or sources_with_error):
+        final_status = "PARTIAL"
+        low_rel_note = f"; {low_relevance_excluded} low-relevance excluded" if low_relevance_excluded else ""
+        stage_msg = (
+            f"Discovery Partially Completed in {duration}s "
+            f"({total_saved} saved, {sourced_stage_count} in Sourced stage{low_rel_note}; some sources had issues)"
+        )
+    elif total_saved == 0 and all_connectors_errored:
+        final_status = "FAILED"
+        stage_msg = "Discovery Failed: No candidates could be retrieved or saved — all connectors errored."
+    elif total_saved == 0 and not all_connectors_errored:
+        final_status = "COMPLETED"
+        stage_msg = f"Discovery Completed in {duration}s — 0 new candidates matched the search criteria."
+    else:
+        final_status = "COMPLETED"
+        low_rel_note = f"; {low_relevance_excluded} low-relevance excluded" if low_relevance_excluded else ""
+        stage_msg = (
+            f"Discovery Completed in {duration}s "
+            f"({total_saved} saved, {sourced_stage_count} in Sourced stage{low_rel_note})"
+        )
+
+    return final_status, stage_msg
+
 
 
 
@@ -273,34 +316,8 @@ class SearchOrchestrator:
             else:
                 reqs = extract_requirements(job["jd_text"])
 
-            # Final safety guard: if the extracted professional title is still a
-            # placeholder or empty, re-extract from the raw JD text one more time.
-            if reqs.job_title.strip().lower() in _BAD_TITLE_PLACEHOLDERS:
-                try:
-                    reqs = extract_requirements(job["jd_text"])
-                except Exception:
-                    pass
-
-            # Recruiter Calibration Feedback Loop (recruiting-copilot & recruiting-sourcing-agent-oss)
-            try:
-                calibration_rows = conn.execute(
-                    "SELECT rating, feedback_text FROM recruiter_feedback WHERE job_id = ? ORDER BY id DESC LIMIT 20",
-                    (job_id,)
-                ).fetchall()
-            except Exception:
-                calibration_rows = []
-
-            # Build primary keyword string for connectors.
-            # Use the extracted professional job title as primary signal;
-            # fall back to required skills only if title is also empty.
-            # NEVER use job["title"] (user save name) as it may be arbitrary.
-            _pro_title = reqs.job_title.strip()
-            if _pro_title and _pro_title.lower() not in _BAD_TITLE_PLACEHOLDERS:
-                keywords = _pro_title
-            elif reqs.required_skills:
-                keywords = " ".join(reqs.required_skills[:3])
-            else:
-                keywords = "Generalist"  # last-resort safe default
+            reqs.job_title = resolve_safe_title(reqs.job_title, jd_text=job["jd_text"])
+            keywords = reqs.job_title
             target_loc = reqs.location or job["location"] or ""
 
             # Target-Company & Talent-Pool Mapping (Recruiting-Skills-for-AI-Agents)
@@ -952,33 +969,16 @@ class SearchOrchestrator:
                 src for src, stats in source_stats.items()
                 if isinstance(stats, dict) and not src.startswith("_") and not stats.get("error") and not stats.get("rate_limited")
             ])
-            all_connectors_errored = (
-                len(active_sources) > 0
-                and connectors_succeeded == 0
-                and len(sources_with_error) >= len(active_sources)
+            final_status, stage_msg = compute_run_final_status(
+                total_saved=total_saved,
+                strategy_issues=strategy_issues,
+                sources_with_error=sources_with_error,
+                active_sources=active_sources,
+                connectors_succeeded=connectors_succeeded,
+                low_relevance_excluded=low_relevance_excluded,
+                sourced_stage_count=sourced_stage_count,
+                duration=duration,
             )
-
-            if total_saved > 0 and (strategy_issues or sources_with_error):
-                final_status = "PARTIAL"
-                low_rel_note = f"; {low_relevance_excluded} low-relevance excluded" if low_relevance_excluded else ""
-                stage_msg = (
-                    f"Discovery Partially Completed in {duration}s "
-                    f"({total_saved} saved, {sourced_stage_count} in Sourced stage{low_rel_note}; some sources had issues)"
-                )
-            elif total_saved == 0 and all_connectors_errored:
-                final_status = "FAILED"
-                stage_msg = "Discovery Failed: No candidates could be retrieved or saved — all connectors errored."
-            elif total_saved == 0 and not all_connectors_errored:
-                # Connectors ran fine but found nothing — not a failure
-                final_status = "COMPLETED"
-                stage_msg = f"Discovery Completed in {duration}s — 0 new candidates matched the search criteria."
-            else:
-                final_status = "COMPLETED"
-                low_rel_note = f"; {low_relevance_excluded} low-relevance excluded" if low_relevance_excluded else ""
-                stage_msg = (
-                    f"Discovery Completed in {duration}s "
-                    f"({total_saved} saved, {sourced_stage_count} in Sourced stage{low_rel_note})"
-                )
 
 
             prog.status = final_status

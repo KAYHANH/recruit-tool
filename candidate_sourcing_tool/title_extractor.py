@@ -25,10 +25,13 @@ ROLE_KEYWORDS = {
     "intern", "interns", "programmer", "programmers", "technician", "technicians",
     "recruiter", "recruiters", "counsel", "lawyer", "writer", "writers",
     "animator", "animators", "illustrator", "illustrators", "producer", "producers",
+    "generalist", "generalists", "evaluator", "evaluators", "trainer", "trainers",
+    "rater", "raters", "operator", "operators",
 }
 
 # Document metadata, section headers, and boilerplate phrases that should NEVER be treated as job titles
 METADATA_DISQUALIFIERS = [
+    r"^(?:type|job\s*type|employment\s*type|contract\s*type|location|work\s*location|pay|salary|rate|hourly\s*rate)\s*:",
     r"^(?:role\s*id|job\s*id|req(?:uisition)?\s*(?:id|#)?|posting\s*id)\b",
     r"^(?:positions?|openings?|active\s*openings?|vacanc(?:y|ies))\b",
     r"^(?:duration|start\s*date|end\s*date|rate|est(?:\.|\s*)earnings?|task\s*time|availability)\b",
@@ -36,7 +39,7 @@ METADATA_DISQUALIFIERS = [
     r"^(?:role\s*overview|position\s*overview|job\s*overview|job\s*summary|about\s*(?:us|the\s*role|the\s*company))\b",
     r"^(?:project\s*snapshot|snapshot|contract\s*details|compensation|benefits|what\s*you(?:'ll|\s*will)\s*do)\b",
     r"^(?:application\s*&\s*selection\s*process|how\s*to\s*apply|submission\s*process)\b",
-    r"^(?:short-term|long-term|full-time|part-time|contract|permanent|temporary|remote|hybrid|on-site)\b",
+    r"^(?:short-term|long-term|full-time|part-time|contract|contractor|permanent|temporary|remote|hybrid|on-site)\b",
     r"^(?:confidential|all\s*rights\s*reserved|internal\s*use\s*only|page\s*\d+)\b",
     r"^\d+\s*(?:active\s*)?(?:openings?|positions?|vacanc(?:y|ies))\b",
     r"^\d+\s*active\s*\+\s*\d+",
@@ -336,3 +339,53 @@ def extract_job_title(jd_text: str) -> TitleExtractionResult:
         detected_candidates=[first_clean],
         warning="Could not automatically confirm the exact job title with high confidence. Please edit before searching.",
     )
+
+
+PLACEHOLDER_TITLES = {
+    "", "candidate search", "new job", "search candidates", "job title",
+    "untitled", "n/a", "none", "unknown", "test job", "test", "job",
+}
+
+
+def is_placeholder_title(title: str | None) -> bool:
+    """Checks if a title is empty or a generic placeholder string."""
+    if not title:
+        return True
+    clean = re.sub(r"\s*\(#?\d+\)\s*", "", title.strip().lower())
+    clean = re.sub(r"\s*xray\s*test\s*role.*$", "", clean, flags=re.I).strip()
+    if not clean or clean in PLACEHOLDER_TITLES:
+        return True
+    if any(p in clean for p in ["candidate search", "new job", "search candidates", "untitled"]):
+        return True
+    return False
+
+
+def resolve_safe_title(raw_title: str | None, jd_text: str = "", fallback: str = "AI Generalist") -> str:
+    """Canonical single-source-of-truth helper to resolve a clean, non-placeholder role title.
+    1. If raw_title is valid and non-placeholder, normalizes and returns it (stripping test suffixes).
+    2. If raw_title is missing/placeholder, attempts to extract a true title from jd_text.
+    3. If extraction still yields a placeholder or jd_text is a stub, uses domain heuristics:
+       - AI/ChatGPT/operations cues -> 'AI Generalist'
+       - Developer/Backend/FastAPI cues -> 'Software Engineer'
+       - Fallback argument.
+    Guarantees 'Candidate Search' is NEVER returned.
+    """
+    if raw_title and not is_placeholder_title(raw_title):
+        clean_name = re.sub(r"\s*XRay\s*Test\s*Role.*$", "", raw_title, flags=re.I).strip()
+        if clean_name and not is_placeholder_title(clean_name):
+            return clean_name
+        return raw_title.strip()
+
+    if jd_text and jd_text.strip():
+        extracted = extract_job_title(jd_text)
+        if extracted.title and not is_placeholder_title(extracted.title):
+            return extracted.title
+
+        jd_lower = jd_text.lower()
+        if any(term in jd_lower for term in ["chatgpt", "generalist", "evaluator", "prompt", "ai training", "annotation", "documentation"]):
+            return "AI Generalist"
+        elif any(term in jd_lower for term in ["fastapi", "python", "backend", "fullstack", "react", "developer", "engineer"]):
+            return "Software Engineer"
+
+    return fallback
+

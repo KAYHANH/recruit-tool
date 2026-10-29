@@ -348,10 +348,17 @@ def test_candidate_persistence_handles_null_urls_and_reaches_100_percent(temp_db
 # Test 9: FastAPI recommended-sources API returns role family and policy
 # ---------------------------------------------------------------------------
 def test_api_recommended_sources(client):
-    # Job #41 exists in the dev database or we get jobs list
     jobs_res = client.get("/api/jobs")
     assert jobs_res.status_code == 200
     jobs = jobs_res.json()
+    if len(jobs) == 0:
+        create_res = client.post("/api/jobs", json={
+            "title": "AI Generalist",
+            "jd_text": "Remote contractor role requiring ChatGPT and documentation.",
+            "location": "Remote, United States"
+        })
+        assert create_res.status_code in (200, 201)
+        jobs = client.get("/api/jobs").json()
     assert len(jobs) > 0
 
     target_job = next((j for j in jobs if "generalist" in j["title"].lower()), jobs[0])

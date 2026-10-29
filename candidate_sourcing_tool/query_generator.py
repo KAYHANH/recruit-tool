@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from urllib.parse import quote_plus
 
 from keyword_extractor import JobRequirements
+from title_extractor import resolve_safe_title
 
 
 @dataclass
@@ -44,7 +45,7 @@ def generate_search_queries(
     """Generates 6-12 varied, high-quality Boolean and Google X-Ray queries.
     Uses exact phrases, OR grouping, recruiter exclusions, and varied specificity levels.
     """
-    primary_title = requirements.job_title.strip() or "Candidate Search"
+    primary_title = resolve_safe_title(requirements.job_title)
     
     # Collect genuine alternative titles (excluding exact matches to primary title)
     titles = [primary_title]

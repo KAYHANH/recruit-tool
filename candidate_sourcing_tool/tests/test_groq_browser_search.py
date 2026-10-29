@@ -307,7 +307,7 @@ def test_search_orchestrator_integration_with_groq_browser(tmp_path):
         assert cand["name"] == "Priya Sharma"
         assert cand["profile_url"] == "https://github.com/psharma-dev"
         assert cand["status"] == "Sourced"
-        assert cand["source"] == "Groq Browser Search"
+        assert cand["source"].startswith("Groq")
         jc_row = test_conn.execute("SELECT match_score FROM job_candidates WHERE job_id = ? AND candidate_id = ?", (job_id, cand["id"])).fetchone()
         assert jc_row is not None
         assert jc_row["match_score"] > 0

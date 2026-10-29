@@ -25,28 +25,36 @@ from unittest.mock import MagicMock, patch
 class TestJDTitleExtraction(unittest.TestCase):
 
     def test_bad_placeholder_triggers_reextract(self):
-        """If extracted_data.job_title is a bad placeholder, extract_requirements must be called."""
-        from keyword_extractor import JobRequirements
+        """If extracted title is a bad placeholder, resolve_safe_title re-extracts true role from JD."""
+        from title_extractor import resolve_safe_title
 
         bad_placeholders = [
             "Candidate Search", "New Job", "Search Candidates",
-            "candidate search", "new job", "",
+            "candidate search", "new job", "", None,
         ]
+        sample_jd = "Contractor remote role requiring ChatGPT proficiency and documentation."
         for placeholder in bad_placeholders:
-            data = {"job_title": placeholder, "required_skills": ["ChatGPT"], "location": "Remote, US"}
-            extracted_title = (data.get("job_title") or "").strip()
-            BAD = {"", "new job", "candidate search", "search candidates", "job title", "untitled", "test job", "test", "job"}
-            is_bad = extracted_title.lower() in BAD
-            self.assertTrue(is_bad, f"Placeholder '{placeholder}' should be detected as bad")
+            resolved = resolve_safe_title(placeholder, jd_text=sample_jd)
+            self.assertIn("Generalist", resolved, f"Expected 'Generalist' role, got '{resolved}' for placeholder '{placeholder}'")
+            self.assertNotIn("Candidate Search", resolved)
+            self.assertNotIn("New Job", resolved)
 
     def test_valid_title_passes_through(self):
-        """If extracted_data.job_title is 'Generalist', it must be preserved."""
-        from keyword_extractor import JobRequirements
+        """If title is 'Generalist', it must be preserved."""
+        from title_extractor import resolve_safe_title
 
-        data = {"job_title": "Generalist", "required_skills": ["ChatGPT", "problem solving"], "location": "Remote, US"}
-        extracted_title = (data.get("job_title") or "").strip()
-        BAD = {"", "new job", "candidate search", "search candidates", "job title", "untitled", "test job", "test", "job"}
-        self.assertNotIn(extracted_title.lower(), BAD, "Valid title 'Generalist' must not be flagged as bad")
+        resolved = resolve_safe_title("Generalist", jd_text="Some text")
+        self.assertEqual(resolved, "Generalist")
+
+    def test_extract_job_title_recognizes_generalist_roles(self):
+        """Single-word 'Generalist' and role variations must not be disqualified as noise."""
+        from title_extractor import extract_job_title, is_disqualified_as_title
+
+        self.assertFalse(is_disqualified_as_title("Generalist"))
+        self.assertFalse(is_disqualified_as_title("Evaluator"))
+        self.assertFalse(is_disqualified_as_title("AI Trainer"))
+        res = extract_job_title("Generalist\nContractor role requiring ChatGPT")
+        self.assertEqual(res.title, "Generalist")
 
 
 # ---------------------------------------------------------------------------
@@ -110,76 +118,32 @@ class TestRateLimitHeaderParsing(unittest.TestCase):
         return err
 
     def test_retry_after_integer(self):
-        """Retry-After: 30 should yield 30s cooldown."""
-        connector = self._make_connector()
-        headers = {"Retry-After": "30"}
-        err = self._make_http_error(headers)
-        with patch("groq_browser_connector.GroqBrowserSearchConnector._get_api_key", return_value="key"):
-            # Simulate 429 parsing logic directly
-            retry_after = err.headers.get("Retry-After")
-            reset_tokens = err.headers.get("x-ratelimit-reset-tokens")
-            reset_requests = err.headers.get("x-ratelimit-reset-requests")
-            import re
-            candidates = []
-            for hval in [retry_after, reset_tokens, reset_requests]:
-                if hval:
-                    try:
-                        parsed = float(re.sub(r"[^0-9.]", "", hval.split("s")[0].split("m")[-1] if "m" in hval else hval))
-                        if parsed > 0:
-                            candidates.append(parsed)
-                    except Exception:
-                        pass
-            cooldown_sec = int(min(candidates)) if candidates else 60
-            self.assertEqual(cooldown_sec, 30, f"Expected cooldown 30s, got {cooldown_sec}s")
+        """Retry-After: 30 should yield 30s cooldown via parse_429_reset_and_reason."""
+        from groq_browser_connector import parse_429_reset_and_reason
+        err = self._make_http_error({"Retry-After": "30"})
+        cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
+        self.assertEqual(cooldown_sec, 30, f"Expected cooldown 30s, got {cooldown_sec}s")
 
     def test_reset_tokens_header(self):
-        """x-ratelimit-reset-tokens: 45 should yield 45s cooldown."""
-        import re
-        headers = {"x-ratelimit-reset-tokens": "45"}
-        retry_after = None
-        reset_tokens = headers.get("x-ratelimit-reset-tokens")
-        reset_requests = headers.get("x-ratelimit-reset-requests")
-        candidates = []
-        for hval in [retry_after, reset_tokens, reset_requests]:
-            if hval:
-                try:
-                    parsed = float(re.sub(r"[^0-9.]", "", hval.split("s")[0].split("m")[-1] if "m" in hval else hval))
-                    if parsed > 0:
-                        candidates.append(parsed)
-                except Exception:
-                    pass
-        cooldown_sec = int(min(candidates)) if candidates else 60
+        """x-ratelimit-reset-tokens: 45 should yield 45s cooldown via parse_429_reset_and_reason."""
+        from groq_browser_connector import parse_429_reset_and_reason
+        err = self._make_http_error({"x-ratelimit-reset-tokens": "45s"})
+        cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
         self.assertEqual(cooldown_sec, 45, f"Expected 45s cooldown, got {cooldown_sec}s")
 
     def test_no_header_defaults_to_60(self):
-        """No reset headers → cooldown defaults to 60s."""
-        import re
-        candidates = []
-        for hval in [None, None, None]:
-            if hval:
-                try:
-                    parsed = float(re.sub(r"[^0-9.]", "", hval))
-                    if parsed > 0:
-                        candidates.append(parsed)
-                except Exception:
-                    pass
-        cooldown_sec = int(min(candidates)) if candidates else 60
+        """No reset headers → cooldown defaults to 60s via parse_429_reset_and_reason."""
+        from groq_browser_connector import parse_429_reset_and_reason
+        err = self._make_http_error({})
+        cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
         self.assertEqual(cooldown_sec, 60)
 
     def test_multiple_headers_uses_minimum(self):
-        """When multiple headers present, smallest value is used."""
-        import re
-        headers = {"Retry-After": "90", "x-ratelimit-reset-tokens": "20", "x-ratelimit-reset-requests": "50"}
-        candidates = []
-        for hval in [headers.get("Retry-After"), headers.get("x-ratelimit-reset-tokens"), headers.get("x-ratelimit-reset-requests")]:
-            if hval:
-                try:
-                    parsed = float(re.sub(r"[^0-9.]", "", hval.split("s")[0].split("m")[-1] if "m" in hval else hval))
-                    if parsed > 0:
-                        candidates.append(parsed)
-                except Exception:
-                    pass
-        cooldown_sec = int(min(candidates)) if candidates else 60
+        """When multiple headers present, smallest value is used via parse_429_reset_and_reason."""
+        from groq_browser_connector import parse_429_reset_and_reason
+        headers = {"Retry-After": "90", "x-ratelimit-reset-tokens": "20s", "x-ratelimit-reset-requests": "50s"}
+        err = self._make_http_error(headers)
+        cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
         self.assertEqual(cooldown_sec, 20, f"Expected min 20s, got {cooldown_sec}s")
 
 
@@ -327,20 +291,15 @@ class TestTotalSavedCounter(unittest.TestCase):
 class TestFinalStatusLogic(unittest.TestCase):
 
     def _compute_status(self, total_saved, strategy_issues, sources_with_error, active_sources, connectors_succeeded):
-        all_connectors_errored = (
-            len(active_sources) > 0
-            and connectors_succeeded == 0
-            and len(sources_with_error) >= len(active_sources)
+        from search_orchestrator import compute_run_final_status
+        status, _ = compute_run_final_status(
+            total_saved=total_saved,
+            strategy_issues=strategy_issues,
+            sources_with_error=sources_with_error,
+            active_sources=active_sources,
+            connectors_succeeded=connectors_succeeded,
         )
-        low_relevance_excluded = 0
-        if total_saved > 0 and (strategy_issues or sources_with_error):
-            return "PARTIAL"
-        elif total_saved == 0 and all_connectors_errored:
-            return "FAILED"
-        elif total_saved == 0 and not all_connectors_errored:
-            return "COMPLETED"
-        else:
-            return "COMPLETED"
+        return status
 
     def test_groq_429_with_local_db_success_is_partial(self):
         """Groq 429 + local_db finds 1 candidate -> PARTIAL, not FAILED."""

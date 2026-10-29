@@ -73,7 +73,7 @@ from matcher import (
 )
 from query_generator import SearchQuery, generate_search_queries
 from search_provider import GitHubCandidateResult, GitHubSearchProvider
-from title_extractor import TitleExtractionResult, extract_job_title
+from title_extractor import TitleExtractionResult, extract_job_title, resolve_safe_title
 from search_orchestrator import SearchOrchestrator
 from source_connectors import (
     GitHubConnector,
@@ -95,7 +95,14 @@ from groq_reasoning import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "candidate_sourcing.db"
+DB_PATH = Path(os.getenv("CANDIDATE_SOURCING_DB_PATH", APP_DIR / "candidate_sourcing.db"))
+
+def set_db_path(new_path: Path | str):
+    """Sets a new database path and reinitializes the global connection (used for isolated tests)."""
+    global DB_PATH, conn
+    DB_PATH = Path(new_path)
+    conn = init_db(DB_PATH)
+    return conn
 
 app = FastAPI(
     title="Candidate Finder API",
@@ -337,13 +344,24 @@ def update_job_details(job_id: int, payload: JobUpdate) -> dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail=f"Job #{job_id} not found.")
 
+    extracted_data_str = payload.extracted_data
+    # Reconcile job.title with extracted_data.job_title so search queries stay in sync
+    if payload.title:
+        try:
+            curr_data = json.loads(payload.extracted_data or job["extracted_data"] or "{}")
+            if curr_data and isinstance(curr_data, dict):
+                curr_data["job_title"] = payload.title
+                extracted_data_str = json.dumps(curr_data)
+        except Exception:
+            pass
+
     update_job(
         conn,
         job_id=job_id,
         title=payload.title,
         jd_text=payload.jd_text,
         location=payload.location,
-        extracted_data=payload.extracted_data,
+        extracted_data=extracted_data_str,
     )
     updated = get_job(conn, job_id)
     return dict(updated)
@@ -491,6 +509,7 @@ def get_job_search_queries(job_id: int) -> dict[str, Any]:
     else:
         reqs = extract_requirements(job["jd_text"])
 
+    reqs.job_title = resolve_safe_title(reqs.job_title, jd_text=job["jd_text"])
     queries = generate_search_queries(reqs, user_location=job["location"] or reqs.location)
     history = get_search_history(conn, job_id=job_id)
 
@@ -563,6 +582,7 @@ def get_job_xray_plan(job_id: int) -> dict[str, Any]:
     else:
         reqs = extract_requirements(job["jd_text"])
 
+    reqs.job_title = resolve_safe_title(reqs.job_title, jd_text=job["jd_text"])
     plan = search_engine_planner.plan_job_search(
         requirements=reqs,
         job_id=job_id,
@@ -586,6 +606,7 @@ def launch_job_xray_batch(job_id: int, payload: LaunchBatchRequest) -> dict[str,
     else:
         reqs = extract_requirements(job["jd_text"])
 
+    reqs.job_title = resolve_safe_title(reqs.job_title, jd_text=job["jd_text"])
     plan = search_engine_planner.plan_job_search(
         requirements=reqs,
         job_id=job_id,
@@ -642,6 +663,7 @@ def execute_job_xray_plan(job_id: int, payload: ExecuteXRayRequest) -> dict[str,
     else:
         reqs = extract_requirements(job["jd_text"])
 
+    reqs.job_title = resolve_safe_title(reqs.job_title, jd_text=job["jd_text"])
     role_fam = talent_pool_mapper.detect_role_family(reqs.job_title, reqs.required_skills, job["jd_text"])
     plan = search_engine_planner.plan_job_search(
         requirements=reqs,
