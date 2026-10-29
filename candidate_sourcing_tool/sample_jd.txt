@@ -1,0 +1,21 @@
+Backend Software Engineer
+
+Location: Bengaluru, India
+Experience: 3+ years
+
+Required skills:
+- Python
+- FastAPI or a similar Python web framework
+- REST APIs
+- SQL and PostgreSQL
+- AWS or another cloud platform
+- Docker
+
+Responsibilities:
+- Build and maintain backend services.
+- Design APIs and integrate databases.
+- Write tests and collaborate with product and engineering teams.
+
+Preferred:
+- CI/CD experience
+- Kubernetes
