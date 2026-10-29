@@ -216,7 +216,7 @@ def extract_job_title(jd_text: str) -> TitleExtractionResult:
     """
     if not jd_text or not jd_text.strip():
         return TitleExtractionResult(
-            title="Candidate Search",
+            title="",
             confidence_score=0.0,
             confidence_level="Low",
             warning="Job description is empty. Please paste or upload a JD.",
@@ -329,14 +329,23 @@ def extract_job_title(jd_text: str) -> TitleExtractionResult:
             warning=f"Inferred title '{primary}' from job description text. Please verify or edit.",
         )
 
-    # 4. Ultimate Fallback: Return first concise heading or default
-    first_clean = non_empty_lines[0] if non_empty_lines and len(non_empty_lines[0].split()) <= 4 else "Candidate Search"
+    # 4. Ultimate Fallback: Return first concise heading or infer from terms
+    first_clean = non_empty_lines[0] if non_empty_lines and len(non_empty_lines[0].split()) <= 4 else ""
+    if not first_clean or is_placeholder_title(first_clean):
+        jd_lower = jd_text.lower()
+        if any(term in jd_lower for term in ["chatgpt", "generalist", "evaluator", "prompt", "ai training", "annotation", "documentation"]):
+            first_clean = "AI Generalist"
+        elif any(term in jd_lower for term in ["fastapi", "python", "backend", "fullstack", "react", "developer", "engineer"]):
+            first_clean = "Software Engineer"
+        else:
+            first_clean = "Specialist"
+
     return TitleExtractionResult(
         title=first_clean,
         alternative_titles=[],
         confidence_score=0.3,
         confidence_level="Low",
-        detected_candidates=[first_clean],
+        detected_candidates=[first_clean] if first_clean else [],
         warning="Could not automatically confirm the exact job title with high confidence. Please edit before searching.",
     )
 

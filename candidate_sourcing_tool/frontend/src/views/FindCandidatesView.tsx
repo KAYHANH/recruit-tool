@@ -1260,7 +1260,9 @@ export const FindCandidatesView: React.FC<FindCandidatesViewProps> = ({
                 <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">
                   {discoveredCandidates.length}
                 </span>
-                <span className="text-xs text-gray-500 hidden sm:inline">• Placed into Sourced Stage</span>
+                <span className="text-xs text-gray-500 hidden sm:inline">
+                  • {discoveredCandidates.filter(c => c.status === 'Sourced').length} Sourced, {discoveredCandidates.filter(c => c.status === 'Low Relevance').length} Low Relevance
+                </span>
               </div>
               <div className="flex items-center gap-3">
                 {onNavigate && (

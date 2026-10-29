@@ -101,6 +101,22 @@ def compute_run_final_status(
     return final_status, stage_msg
 
 
+def determine_candidate_job_stage(match_score: int, contradictory_count: int, min_score: int = 30) -> str:
+    """Quality / Relevance Gate:
+    A candidate requires:
+      - confidence-adjusted score >= min_score (default 30)
+      - zero contradictory criteria (e.g. wrong country for a US-only role)
+    Candidates below the threshold go to 'Low Relevance' — they are kept in the
+    database but excluded from the Sourced stage pipeline to prevent false positives.
+    Zero match candidates go to 'Needs Review'.
+    """
+    has_fatal_contradiction = contradictory_count > 0
+    if match_score >= min_score and not has_fatal_contradiction:
+        return "Sourced"
+    elif match_score > 0:
+        return "Low Relevance"
+    else:
+        return "Needs Review"
 
 
 @dataclass
@@ -766,15 +782,7 @@ class SearchOrchestrator:
                     # Candidates below the threshold go to "Low Relevance" — they are kept in the
                     # database but excluded from the Sourced stage pipeline to prevent false positives
                     # like a 3D artist in Brazil appearing for a US remote AI Generalist role.
-                    SOURCED_STAGE_MIN_SCORE = 30
-                    has_fatal_contradiction = eval_res.contradictory_count > 0
-                    is_qualified = (cand.match_score >= SOURCED_STAGE_MIN_SCORE and not has_fatal_contradiction)
-                    if is_qualified:
-                        job_stage = "Sourced"
-                    elif cand.match_score > 0:
-                        job_stage = "Low Relevance"
-                    else:
-                        job_stage = "Needs Review"
+                    job_stage = determine_candidate_job_stage(cand.match_score, eval_res.contradictory_count)
 
 
                     # Safeguard profile_url against NULL/empty to guarantee SQLite NOT NULL integrity
@@ -826,7 +834,7 @@ class SearchOrchestrator:
 
                     cand.id = c_id
                     associated_job_count += 1
-                    if is_qualified:
+                    if job_stage == "Sourced":
                         sourced_stage_count += 1
 
                     # Link score and stage to job_candidates
@@ -893,21 +901,22 @@ class SearchOrchestrator:
 
             # Reconcile actual counts for this run only.
             # "total_saved" = candidates newly inserted or updated during this run.
-            # Do NOT count pre-existing job_candidate rows — that would inflate the counter.
             total_saved = newly_inserted_count + updated_count
             prog.total_saved = total_saved
 
-            # Recompute sourced_stage_count from the DB for accuracy
+            # Reconcile counts for THIS run:
+            run_sourced_count = sum(1 for c in discovered_list if c.get("status") == "Sourced")
+            low_relevance_excluded = sum(
+                1 for c in discovered_list if c.get("status") == "Low Relevance"
+            )
+            sourced_stage_count = run_sourced_count
+
+            # Cumulative sourced candidates for the job overall across all runs in SQLite:
             sourced_row = conn.execute(
                 "SELECT count(*) FROM job_candidates WHERE job_id = ? AND status = 'Sourced'",
                 (job_id,),
             ).fetchone()
-            sourced_stage_count = sourced_row[0] if sourced_row else sourced_stage_count
-
-            # Low relevance count: candidates processed but excluded from Sourced
-            low_relevance_excluded = sum(
-                1 for c in discovered_list if c.get("status") == "Low Relevance"
-            )
+            job_sourced_total = sourced_row[0] if sourced_row else run_sourced_count
 
             task_count_row = conn.execute("SELECT count(*) FROM search_tasks WHERE run_id = ?", (run_id,)).fetchone()
             search_tasks_attempted = task_count_row[0] if task_count_row else len(prog.strategy_tasks)
@@ -926,7 +935,9 @@ class SearchOrchestrator:
                 "candidates_newly_saved": newly_inserted_count,
                 "candidates_updated": updated_count,
                 "candidates_associated_job": associated_job_count,
-                "sourced_stage_count": sourced_stage_count,
+                "sourced_stage_count": run_sourced_count,
+                "run_sourced_count": run_sourced_count,
+                "job_sourced_total": job_sourced_total,
                 "low_relevance_excluded": low_relevance_excluded,
                 "rejected_count": rejected_count,
                 "source_backed_contacts": source_backed_contacts,

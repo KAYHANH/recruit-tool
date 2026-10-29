@@ -153,27 +153,71 @@ class TestRateLimitHeaderParsing(unittest.TestCase):
 class TestRateLimitDoesNotKillAllStrategies(unittest.TestCase):
 
     def test_single_429_only_marks_that_strategy(self):
-        """When strategy A gets 429, strategies B-G should remain in PENDING, not RATE_LIMITED."""
-        strategy_tasks = {
-            f"Strategy {k}": {"key": f"Strategy {k}", "status": "PENDING", "error_message": ""}
-            for k in ["A", "B", "C", "D", "E", "F", "G"]
-        }
+        """When Groq returns 429 during a multi-source search, other connectors (like local_db)
+        still execute and return candidates, and the run finishes as PARTIAL rather than FAILED.
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from search_orchestrator import SearchOrchestrator
+        from source_connectors import ConnectorSearchResult, RawCandidateProfile
+        from db import init_db, add_job
 
-        # Simulate: strategy A hits 429, we set cooldown and mark only A
-        cooldown_until = time.time() + 30
-        strategy_tasks["Strategy A"]["status"] = "RATE_LIMITED"
-        strategy_tasks["Strategy A"]["error_message"] = "Rate limited"
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            temp_db = Path(f.name)
+        conn = init_db(temp_db)
+        job_id = add_job(conn, "AI Generalist", "Remote contractor role with ChatGPT", "Remote, US")
+        conn.close()
 
-        # Subsequent strategies check cooldown and also get RATE_LIMITED
-        # BUT with our fix, the orchestrator does `continue` for that strategy only
-        # and moves to the next strategy. Let's verify only A is marked:
-        rate_limited_strategies = [k for k, v in strategy_tasks.items() if v["status"] == "RATE_LIMITED"]
-        self.assertEqual(
-            rate_limited_strategies, ["Strategy A"],
-            f"Only Strategy A should be RATE_LIMITED, got: {rate_limited_strategies}"
+        orch = SearchOrchestrator(db_path=temp_db)
+
+        mock_429_res = ConnectorSearchResult(
+            source_name="Groq Browser Search",
+            source_id="groq_browser",
+            candidates=[],
+            rate_limited=True,
+            error_message="Rate limit exceeded: TPM reached (wait 20s)",
         )
-        pending_strategies = [k for k, v in strategy_tasks.items() if v["status"] == "PENDING"]
-        self.assertEqual(len(pending_strategies), 6, f"6 strategies should remain PENDING, got: {pending_strategies}")
+        mock_local_cand = RawCandidateProfile(
+            name="Alex Evaluator",
+            profile_url="https://linkedin.com/in/alex-evaluator",
+            headline="AI Evaluator & Prompt Specialist",
+            location="Remote, United States",
+            source="Local DB Rediscovery",
+            evidence_text="Experienced prompt evaluator and ChatGPT reviewer.",
+        )
+        mock_local_res = ConnectorSearchResult(
+            source_name="Local DB Rediscovery",
+            source_id="local_db",
+            candidates=[mock_local_cand],
+        )
+
+        with patch("groq_browser_connector.resolve_groq_api_key", return_value="gsk_mock"), \
+             patch("groq_browser_connector.GroqBrowserSearchConnector.check_status", return_value={"available": True, "model": "openai/gpt-oss-120b"}), \
+             patch("groq_browser_connector.GroqBrowserSearchConnector.search_consolidated", return_value=mock_429_res), \
+             patch("source_connectors.LocalDatabaseConnector.search", return_value=mock_local_res):
+
+            run = orch.start_run(
+                job_id=job_id,
+                enabled_sources=["groq_browser", "local_db"],
+                limit_per_source=2,
+            )
+            for _ in range(50):
+                st = orch.get_run_status(run.run_id)
+                if st and st.status in ("COMPLETED", "PARTIAL", "FAILED"):
+                    break
+                time.sleep(0.1)
+
+            final_st = orch.get_run_status(run.run_id)
+            self.assertIsNotNone(final_st)
+            self.assertEqual(final_st.status, "PARTIAL", f"Expected PARTIAL run status when Groq 429s but local DB succeeds, got {final_st.status}")
+            self.assertGreaterEqual(final_st.total_saved, 1, "Local DB candidate must be saved even if Groq was rate limited")
+
+            # Clean up temp db
+            try:
+                temp_db.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -189,15 +233,11 @@ class TestSourcedStageThreshold(unittest.TestCase):
         return e
 
     def _gate(self, eval_res) -> str:
-        SOURCED_STAGE_MIN_SCORE = 30
-        has_fatal_contradiction = eval_res.contradictory_count > 0
-        is_qualified = (eval_res.confidence_adjusted_score >= SOURCED_STAGE_MIN_SCORE and not has_fatal_contradiction)
-        if is_qualified:
-            return "Sourced"
-        elif eval_res.confidence_adjusted_score > 0:
-            return "Low Relevance"
-        else:
-            return "Needs Review"
+        from search_orchestrator import determine_candidate_job_stage
+        return determine_candidate_job_stage(
+            match_score=eval_res.confidence_adjusted_score,
+            contradictory_count=eval_res.contradictory_count,
+        )
 
     def test_11_percent_score_goes_to_low_relevance_not_sourced(self):
         """Lucas Silva (11% score) must NOT go to Sourced."""
