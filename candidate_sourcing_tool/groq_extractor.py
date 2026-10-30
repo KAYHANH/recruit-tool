@@ -11,6 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from keyword_extractor import JobRequirements
+from title_extractor import resolve_safe_title
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
@@ -273,7 +274,7 @@ def extract_requirements_with_groq(
         parsed_json = json.loads(raw_content)
 
         # Validate structured fields
-        job_title = str(parsed_json.get("job_title", "")).strip() or "Candidate Search"
+        job_title = resolve_safe_title(parsed_json.get("job_title", ""), jd_text=jd_text, fallback="AI Generalist")
         alt_titles = [str(x).strip() for x in parsed_json.get("alternative_titles", []) if str(x).strip()]
         req_skills = [str(x).strip() for x in parsed_json.get("required_skills", []) if str(x).strip()]
         pref_skills = [str(x).strip() for x in parsed_json.get("preferred_skills", []) if str(x).strip()]

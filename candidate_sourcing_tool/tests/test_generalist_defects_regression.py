@@ -138,13 +138,21 @@ class TestRateLimitHeaderParsing(unittest.TestCase):
         cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
         self.assertEqual(cooldown_sec, 60)
 
-    def test_multiple_headers_uses_minimum(self):
-        """When multiple headers present, smallest value is used via parse_429_reset_and_reason."""
+    def test_authoritative_retry_after_takes_precedence(self):
+        """When Retry-After is specified, it takes authoritative precedence over sub-quota headers."""
         from groq_browser_connector import parse_429_reset_and_reason
         headers = {"Retry-After": "90", "x-ratelimit-reset-tokens": "20s", "x-ratelimit-reset-requests": "50s"}
         err = self._make_http_error(headers)
-        cooldown_sec, reason, _ = parse_429_reset_and_reason(err)
-        self.assertEqual(cooldown_sec, 20, f"Expected min 20s, got {cooldown_sec}s")
+        cooldown_sec, reset_label, reason = parse_429_reset_and_reason(err)
+        self.assertEqual(cooldown_sec, 90, f"Expected authoritative 90s, got {cooldown_sec}s")
+
+    def test_ambiguous_headers_uses_safe_maximum(self):
+        """When multiple quota headers are present without Retry-After, safe maximum is used to avoid premature retry."""
+        from groq_browser_connector import parse_429_reset_and_reason
+        headers = {"x-ratelimit-reset-tokens": "20s", "x-ratelimit-reset-requests": "50s"}
+        err = self._make_http_error(headers)
+        cooldown_sec, reset_label, reason = parse_429_reset_and_reason(err)
+        self.assertEqual(cooldown_sec, 50, f"Expected safe maximum 50s, got {cooldown_sec}s")
 
 
 # ---------------------------------------------------------------------------

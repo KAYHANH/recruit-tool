@@ -35,6 +35,7 @@ from source_connectors import (
 from groq_browser_connector import GroqBrowserSearchConnector
 from groq_reasoning import (
     GroqToolCallingOrchestrator,
+    generate_local_match_explanation,
     explain_candidate_match_with_groq,
     plan_search_reasoning,
 )
@@ -757,19 +758,9 @@ class SearchOrchestrator:
                     cand.evidence_ladder_tier = eval_res.evidence_tier
                     eval_dict = eval_res.to_dict()
 
-                    # Generate qualitative AI match explanation when Groq is enabled and available
-                    if "groq_browser" in enabled_sources:
-                        groq_c = connectors.get("groq_browser")
-                        if not groq_c or getattr(groq_c, "_cooldown_until", 0.0) <= time.time():
-                            try:
-                                ai_expl = explain_candidate_match_with_groq(
-                                    candidate=cand_dict,
-                                    requirements=reqs,
-                                )
-                                if ai_expl:
-                                    eval_dict["ai_explanation"] = ai_expl
-                            except Exception:
-                                pass
+                    # Zero-PII Offline Match Explanation: Zero external candidate data transmission.
+                    # Eliminates repeated Groq API calls per candidate to protect 100% privacy and prevent 429 quota exhaustion.
+                    eval_dict["ai_explanation"] = generate_local_match_explanation(cand_dict, reqs)
 
 
                     cand.match_details = json.dumps(eval_dict)
@@ -899,24 +890,39 @@ class SearchOrchestrator:
 
             conn.commit()
 
-            # Reconcile actual counts for this run only.
-            # "total_saved" = candidates newly inserted or updated during this run.
+            # --- Authoritative SQLite Database Reconciliation Audit ---
+            # 1. Total candidates newly saved or updated during THIS specific run:
             total_saved = newly_inserted_count + updated_count
             prog.total_saved = total_saved
 
-            # Reconcile counts for THIS run:
+            # 2. Status counts for candidates processed during THIS run:
             run_sourced_count = sum(1 for c in discovered_list if c.get("status") == "Sourced")
             low_relevance_excluded = sum(
                 1 for c in discovered_list if c.get("status") == "Low Relevance"
             )
+            needs_review_count = sum(
+                1 for c in discovered_list if c.get("status") == "Needs Review"
+            )
             sourced_stage_count = run_sourced_count
 
-            # Cumulative sourced candidates for the job overall across all runs in SQLite:
-            sourced_row = conn.execute(
+            # 3. Direct DB-audited totals across all runs for this job in SQLite:
+            db_job_total_row = conn.execute(
+                "SELECT count(*) FROM job_candidates WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            job_candidates_total = db_job_total_row[0] if db_job_total_row else total_saved
+
+            db_sourced_row = conn.execute(
                 "SELECT count(*) FROM job_candidates WHERE job_id = ? AND status = 'Sourced'",
                 (job_id,),
             ).fetchone()
-            job_sourced_total = sourced_row[0] if sourced_row else run_sourced_count
+            job_sourced_total = db_sourced_row[0] if db_sourced_row else run_sourced_count
+
+            db_low_rel_row = conn.execute(
+                "SELECT count(*) FROM job_candidates WHERE job_id = ? AND status = 'Low Relevance'",
+                (job_id,),
+            ).fetchone()
+            job_low_rel_total = db_low_rel_row[0] if db_low_rel_row else low_relevance_excluded
 
             task_count_row = conn.execute("SELECT count(*) FROM search_tasks WHERE run_id = ?", (run_id,)).fetchone()
             search_tasks_attempted = task_count_row[0] if task_count_row else len(prog.strategy_tasks)
@@ -938,7 +944,10 @@ class SearchOrchestrator:
                 "sourced_stage_count": run_sourced_count,
                 "run_sourced_count": run_sourced_count,
                 "job_sourced_total": job_sourced_total,
+                "job_candidates_total": job_candidates_total,
+                "job_low_relevance_total": job_low_rel_total,
                 "low_relevance_excluded": low_relevance_excluded,
+                "needs_review_count": needs_review_count,
                 "rejected_count": rejected_count,
                 "source_backed_contacts": source_backed_contacts,
                 "total_candidates_saved": total_saved,

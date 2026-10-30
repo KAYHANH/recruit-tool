@@ -479,15 +479,15 @@ def plan_search_reasoning(
     if not api_key:
         return _fallback_search_plan(requirements, broaden=broaden_search)
 
+    # Privacy Protection: Never transmit raw candidate feedback notes or recruiter private text to external LLMs.
+    # Instead, summarize high-level rating distributions without personal identifiers.
     feedback_notes = []
     if previous_feedback:
-        for f in previous_feedback[:5]:
-            r = f.get("rating", "")
-            t = f.get("feedback_text", "")
-            if t:
-                feedback_notes.append(f"- Candidate rated '{r}': {t}")
+        ratings = [str(f.get("rating", "")) for f in previous_feedback if f.get("rating")]
+        if ratings:
+            feedback_notes.append(f"Calibration ratings signal: {', '.join(ratings[:5])}")
 
-    feedback_context = "\n".join(feedback_notes) if feedback_notes else "No previous feedback recorded."
+    feedback_context = "\n".join(feedback_notes) if feedback_notes else "Standard role search."
 
     broaden_prompt = "Initial searches returned low yield. Generate broader, less restrictive variations." if broaden_search else ""
 
@@ -644,8 +644,11 @@ def explain_candidate_match_with_groq(
         return _fallback_match_explanation(candidate, requirements)
 
 
-def _fallback_match_explanation(candidate: dict[str, Any], requirements: JobRequirements) -> dict[str, Any]:
-    """Rule-based heuristic match explanation fallback."""
+def generate_local_match_explanation(candidate: dict[str, Any], requirements: JobRequirements) -> dict[str, Any]:
+    """Rule-based heuristic match explanation executed 100% locally.
+    Guarantees zero candidate PII transmission to external networks while producing
+    transparent, evidence-backed criteria breakdowns.
+    """
     name = candidate.get("name", "Candidate")
     evidence = (candidate.get("evidence_text") or "").lower()
     matched = [s for s in requirements.required_skills if s.lower() in evidence]
@@ -659,6 +662,9 @@ def _fallback_match_explanation(candidate: dict[str, Any], requirements: JobRequ
         "evidence_verdict": "Moderate Match" if matched else "Insufficient Evidence",
         "uncertainty_flags": ["Generated via offline heuristic without external LLM."],
     }
+
+
+_fallback_match_explanation = generate_local_match_explanation
 
 
 # ==============================================================================

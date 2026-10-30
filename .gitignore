@@ -12,6 +12,8 @@
 *.bak*
 candidate_sourcing.db*
 candidate_sourcing_backup_*.db
+*.csv
+shortlist_*.csv
 
 # Python & Caches
 __pycache__/

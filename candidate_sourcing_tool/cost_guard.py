@@ -96,7 +96,7 @@ VERIFIED_FREE_REGISTRY: dict[str, ProviderCostContract] = {
         cost_per_request=0.0,
         access_type="Groq Cloud Free Tier (openai/gpt-oss-120b + browser_search)",
         rate_limit_policy="1,000 req/day, 8,000 tokens/min Free Tier with stop on HTTP 429",
-        notes="Automated web discovery using Groq's built-in browser_search tool. ₹0.00 spend strictly enforced.",
+        notes="Automated web discovery using Groq's built-in browser_search tool. Strict ₹0.00 spend guaranteed by adhering to free-tier quotas and immediately stopping on rate limits.",
     ),
     "groq_extractor": ProviderCostContract(
         provider_id="groq_extractor",
@@ -105,7 +105,7 @@ VERIFIED_FREE_REGISTRY: dict[str, ProviderCostContract] = {
         cost_per_request=0.0,
         access_type="Groq Cloud Free Tier (openai/gpt-oss-120b or llama-3.3-70b-versatile)",
         rate_limit_policy="1,000 req/day, 8,000 tokens/min Free Tier with stop on HTTP 429",
-        notes="JD parsing, candidate explanation, deduplication reasoning under ₹0.00 spend guarantee.",
+        notes="JD parsing, candidate explanation, deduplication reasoning under strict ₹0.00 spend guarantee with automatic halt on 429 quota exhaustion.",
     ),
     "groq_reasoning": ProviderCostContract(
         provider_id="groq_reasoning",
@@ -114,7 +114,7 @@ VERIFIED_FREE_REGISTRY: dict[str, ProviderCostContract] = {
         cost_per_request=0.0,
         access_type="Groq Cloud Free Tier (openai/gpt-oss-120b or llama-3.3-70b-versatile)",
         rate_limit_policy="1,000 req/day, 8,000 tokens/min Free Tier with stop on HTTP 429",
-        notes="Multi-turn function calling and feedback calibration under ₹0.00 spend guarantee.",
+        notes="Multi-turn function calling and feedback calibration under strict ₹0.00 spend guarantee with graceful fallback to local scoring.",
     ),
 }
 

@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-from title_extractor import ROLE_KEYWORDS, extract_job_title
+from title_extractor import ROLE_KEYWORDS, extract_job_title, resolve_safe_title
 
 # Comprehensive recruitment stopwords & boilerplate words
 RECRUITMENT_STOPWORDS = {
@@ -417,7 +417,7 @@ class JobRequirements:
     @classmethod
     def from_dict(cls, data: dict) -> JobRequirements:
         return cls(
-            job_title=data.get("job_title", "Candidate Search"),
+            job_title=resolve_safe_title(data.get("job_title"), fallback="Specialist"),
             alternative_titles=data.get("alternative_titles", []),
             required_skills=data.get("required_skills", []),
             preferred_skills=data.get("preferred_skills", []),

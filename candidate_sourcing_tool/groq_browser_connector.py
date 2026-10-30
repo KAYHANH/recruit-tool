@@ -149,33 +149,50 @@ def parse_429_reset_and_reason(http_err: HTTPError) -> tuple[int, str, str]:
     except Exception:
         err_body = str(http_err)
 
-    candidates: list[float] = []
-    for h in [retry_after, reset_tokens, reset_requests]:
-        dur = _parse_duration_to_seconds(h)
-        if dur is not None and dur > 0:
-            candidates.append(dur)
+    # Extract parsed seconds from headers
+    dur_retry_after = _parse_duration_to_seconds(retry_after)
+    dur_reset_tokens = _parse_duration_to_seconds(reset_tokens)
+    dur_reset_requests = _parse_duration_to_seconds(reset_requests)
 
-    # Check error body JSON / text for explicit reset instructions
+    # Check error body JSON / text for explicit reset instructions (e.g. "try again in 14.5s")
     body_label = ""
+    dur_body = None
     body_match = re.search(r"try again in\s+([0-9a-z\.]+)", err_body, re.IGNORECASE)
     if body_match:
         body_label = body_match.group(1)
-        dur = _parse_duration_to_seconds(body_label)
-        if dur is not None and dur > 0:
-            candidates.append(dur)
+        dur_body = _parse_duration_to_seconds(body_label)
 
-    cooldown_sec = int(min(candidates)) if candidates else 60
+    # Determine safe cooldown duration:
+    # 1. Authoritative Retry-After header takes primary precedence if provided
+    # 2. Body-specific duration (e.g. "try again in 20s") if explicitly instructed by API
+    # 3. If rate-limit headers present, match the exhausted quota type (TPM vs RPM)
+    # 4. If multiple headers exist, choose the SAFE maximum window (never premature minimum)
+    err_body_lower = err_body.lower()
+    is_tpm = "token" in err_body_lower or "tpm" in err_body_lower
+    is_rpm = "request" in err_body_lower or "rpm" in err_body_lower or "rpd" in err_body_lower
+
+    if dur_retry_after is not None and dur_retry_after > 0:
+        cooldown_sec = int(dur_retry_after)
+    elif dur_body is not None and dur_body > 0:
+        cooldown_sec = int(dur_body)
+    elif is_tpm and dur_reset_tokens is not None and dur_reset_tokens > 0:
+        cooldown_sec = int(dur_reset_tokens)
+    elif is_rpm and dur_reset_requests is not None and dur_reset_requests > 0:
+        cooldown_sec = int(dur_reset_requests)
+    else:
+        available_durs = [d for d in [dur_reset_tokens, dur_reset_requests] if d is not None and d > 0]
+        cooldown_sec = int(max(available_durs)) if available_durs else 60
+
     cooldown_sec = max(10, min(cooldown_sec, 3600))  # bounded safe clamp
 
-    reset_label = retry_after or reset_tokens or reset_requests or body_label or f"{cooldown_sec}s"
+    reset_label = retry_after or body_label or (reset_tokens if is_tpm else reset_requests) or f"{cooldown_sec}s"
 
     # Identify exact exhaustion reason
-    err_body_lower = err_body.lower()
-    if "token" in err_body_lower or "tpm" in err_body_lower:
+    if is_tpm:
         reason = f"Groq TPM limit reached (Tokens per minute exhausted; resets in {reset_label})"
-    elif "request" in err_body_lower or "rpm" in err_body_lower:
+    elif is_rpm:
         reason = f"Groq RPM limit reached (Requests per minute exhausted; resets in {reset_label})"
-    elif "day" in err_body_lower or "daily" in err_body_lower or "rpd" in err_body_lower:
+    elif "day" in err_body_lower or "daily" in err_body_lower:
         reason = f"Groq daily free request quota exhausted (resets in {reset_label})"
     else:
         reason = f"Groq Free Tier rate limit reached (HTTP 429; resets in {reset_label})"
