@@ -89,3 +89,45 @@ Candidate Finder defaults to the 100% offline, local rule-based extractor. If yo
 2. Configure `GROQ_API_KEY=gsk_...` and `GROQ_MODEL=openai/gpt-oss-120b` in `.env`.
 3. Candidate Finder loads `.env` automatically via `python-dotenv`.
 4. Only the Job Description text is sent to Groq; candidate profiles, CVs, and database records are **never** transmitted externally.
+
+
+## Bulk CV Referral Outreach (new module)
+
+The **CV Referral Outreach** sidebar module adds local PDF/DOCX parsing, email extraction, normalized-email deduplication, skill-based matching against manually verified Turing/Mercor/micro1 referral opportunities, and Gmail draft creation. It never sends email.
+
+### Install dependencies
+
+```powershell
+python -m pip install -r requirements.txt
+cd frontend
+npm install
+cd ..
+```
+
+### Gmail OAuth setup (one-time)
+
+1. In Google Cloud Console, create/select a project and enable the Gmail API.
+2. Configure the OAuth consent screen. Add your Google account as a test user if the app is in Testing mode.
+3. Create an OAuth Client ID (Web application) and add this exact authorized redirect URI: `http://127.0.0.1:8000/api/bulk-outreach/gmail/callback`.
+4. Download the client JSON and save it locally as `credentials.json` in this folder (never commit it).
+5. Start Candidate Finder, open **CV Referral Outreach**, click **Connect Gmail**, and complete Google's authorization.
+6. The app stores a local refresh token in `.gmail_token.json`. Keep this file private and backed up securely.
+
+Optional environment variables: `GOOGLE_OAUTH_CLIENT_SECRETS`, `GMAIL_TOKEN_PATH`, `GOOGLE_OAUTH_REDIRECT_URI`, and `CANDIDATE_SOURCING_DB_PATH`.
+
+### Use
+
+1. Select up to 1,000 PDF/DOCX CV files in one batch. Files are processed locally; individual files are limited to 15 MB.
+2. Confirm you have an appropriate basis to contact the candidates about relevant opportunities. This confirmation is an operator attestation, not proof that consent exists.
+3. Add each opportunity manually with its role requirements and your own HTTPS referral URL. Verify the URL and platform terms before saving.
+4. Review candidate-match evidence. Scanned PDFs need OCR and are reported as errors rather than silently treated as empty CVs.
+5. Connect Gmail and create drafts one candidate/opportunity at a time. Review and send manually in Gmail.
+
+### Important limitations
+
+- Email extraction and name/skill parsing are heuristic; inspect the records before outreach.
+- Matching is a simple keyword-overlap score, not an employer/platform screening decision.
+- The first implementation stores the first valid email found per CV; additional email addresses are not yet offered for selection.
+- Gmail compose scope is used for draft creation; the application has no send-email endpoint.
+- No referral links, jobs, compensation or payout promises are supplied automatically.
+- Contact candidates only where you have an appropriate legal basis and honor opt-outs. A CV containing an email address does not itself establish permission to send marketing messages.
