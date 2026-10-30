@@ -9,6 +9,7 @@ import { ShortlistView } from './views/ShortlistView';
 import { SavedJobsDataView } from './views/SavedJobsDataView';
 import { SettingsView } from './views/SettingsView';
 import { PipelineView } from './views/PipelineView';
+import { BulkReferralOutreachView } from './views/BulkReferralOutreachView';
 import { api } from './api';
 import type { DashboardMetrics, Job } from './types';
 
@@ -137,6 +138,7 @@ export const App: React.FC = () => {
           />
         )}
 
+        {currentView === 'outreach' && <BulkReferralOutreachView />}
         {currentView === 'settings' && <SettingsView />}
       </main>
     </div>

@@ -44,3 +44,8 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Gmail OAuth secrets and tokens (never commit)
+credentials.json
+.gmail_token.json
+.gmail_oauth_state
