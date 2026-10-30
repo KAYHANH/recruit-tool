@@ -371,6 +371,9 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
 
     seed_candidate_experiences_if_empty(conn)
     seed_default_opportunities_if_empty(conn)
+    # Normalize legacy Groq Web Search labels to canonical Groq Browser Search
+    conn.execute("UPDATE candidates SET source = 'Groq Browser Search' WHERE source LIKE 'Groq Web Search%'")
+    conn.commit()
     return conn
 
 

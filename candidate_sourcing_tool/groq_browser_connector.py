@@ -339,9 +339,10 @@ def parse_browser_search_response(
         email = email_match.group(0) if email_match else ""
 
         contact_status = "Publicly published" if (email or github_url) else "Discovered on Web"
-        source_label = f"Groq Web Search ({default_strategy_key})" if default_strategy_key else "Groq Browser Search"
-        contact_prov = f"Web Search Citation via {source_label} [Discovered {now_str}]"
-        combined_evidence = f"[Discovered via {source_label}]\nURL: {profile_url}\n{evidence}"
+        source_label = "Groq Browser Search"
+        strat_info = f" ({default_strategy_key})" if default_strategy_key else ""
+        contact_prov = f"Web Search Citation via {source_label}{strat_info} [Discovered {now_str}]"
+        combined_evidence = f"[Discovered via {source_label}{strat_info}]\nURL: {profile_url}\n{evidence}"
         if skills:
             combined_evidence += f"\nMatched Skills: {skills}"
 
@@ -781,24 +782,20 @@ class GroqBrowserSearchConnector(BaseSourceConnector):
 
                 candidates = parse_browser_search_response(content, default_strategy_key="Consolidated")
 
-                # Map each returned candidate to its best strategy platform
+                # Map each returned candidate to its best strategy platform while keeping canonical source
                 for c in candidates:
                     u_lower = (c.profile_url or "").lower()
                     if "linkedin.com/in/" in u_lower:
                         c.raw_data["strategy_key"] = "Strategy A"
-                        c.source = "Groq Web Search (Strategy A)"
                     elif any(cv_kw in u_lower for cv_kw in [".pdf", "/resume", "/cv", "resume."]):
                         c.raw_data["strategy_key"] = "Strategy E"
-                        c.source = "Groq Web Search (Strategy E)"
                     elif any(b_kw in u_lower for b_kw in ["medium.com", "substack.com", ".github.io"]):
                         c.raw_data["strategy_key"] = "Strategy F"
-                        c.source = "Groq Web Search (Strategy F)"
                     elif "github.com" in u_lower or "gitlab.com" in u_lower:
                         c.raw_data["strategy_key"] = "Strategy D"
-                        c.source = "Groq Web Search (Strategy D)"
                     else:
                         c.raw_data["strategy_key"] = "Strategy A"
-                        c.source = "Groq Web Search (Strategy A)"
+                    c.source = "Groq Browser Search"
 
                 return ConnectorSearchResult(
                     source_name=self.name,

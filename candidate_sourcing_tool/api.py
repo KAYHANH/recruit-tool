@@ -1415,12 +1415,16 @@ def get_overview_statistics() -> dict[str, Any]:
     shortlisted = conn.execute("SELECT COUNT(*) FROM candidates WHERE status = 'Shortlisted'").fetchone()[0]
     archived = conn.execute("SELECT COUNT(*) FROM candidates WHERE status = 'Archived'").fetchone()[0]
 
-    # Source breakdown
-    source_counts = {}
+    # Source breakdown with canonical normalization
+    source_counts: dict[str, int] = {}
     rows = conn.execute("SELECT source, COUNT(*) as cnt FROM candidates GROUP BY source").fetchall()
     for r in rows:
-        src = r["source"] or "Manual entry"
-        source_counts[src] = r["cnt"]
+        src = (r["source"] or "Manual entry").strip()
+        if src.startswith("Groq Web Search") or src.startswith("Groq Browser Search"):
+            canonical_src = "Groq Browser Search"
+        else:
+            canonical_src = src
+        source_counts[canonical_src] = source_counts.get(canonical_src, 0) + r["cnt"]
 
     # Contact status breakdown
     contacts_found = conn.execute("SELECT COUNT(*) FROM candidates WHERE email != '' OR phone != ''").fetchone()[0]

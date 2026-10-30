@@ -268,7 +268,7 @@ export const FindCandidatesView: React.FC<FindCandidatesViewProps> = ({
         enabled_sources: enabledSources.includes('groq_browser') ? enabledSources : [...enabledSources, 'groq_browser'],
       });
       setCurrentRunId(res.run_id);
-      setBatchSuccessMsg(`⚡ Executing ${res.strategies_queued?.length || (strategyKeys ? strategyKeys.length : 7)} sourcing strategies automatically via Groq Web Search engine.`);
+      setBatchSuccessMsg(`⚡ Executing ${res.strategies_queued?.length || (strategyKeys ? strategyKeys.length : 7)} sourcing strategies automatically via Groq Browser Search engine.`);
       setTimeout(() => setBatchSuccessMsg(null), 8000);
 
       // Start Polling Run Status
@@ -867,7 +867,7 @@ export const FindCandidatesView: React.FC<FindCandidatesViewProps> = ({
                   disabled={isSearching || !xrayPlan || xrayPlan.strategies.length === 0}
                   onClick={() => handleExecuteStrategies()}
                   className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-all shadow-sm"
-                  title="Executes all 7 X-Ray sourcing strategies automatically via Groq Web Search engine and imports real candidates"
+                  title="Executes all 7 X-Ray sourcing strategies automatically via Groq Browser Search engine and imports real candidates"
                 >
                   {isSearching ? (
                     <>
@@ -1007,7 +1007,7 @@ export const FindCandidatesView: React.FC<FindCandidatesViewProps> = ({
                             disabled={isSearching}
                             onClick={() => handleExecuteStrategies([strat.key])}
                             className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[11px] font-semibold transition-colors flex items-center gap-1 shadow-2xs disabled:opacity-50"
-                            title={`Execute ${strat.name} automatically via Groq Web Search and import candidate results`}
+                            title={`Execute ${strat.name} automatically via Groq Browser Search and import candidate results`}
                           >
                             <Sparkles className="w-3 h-3 text-amber-300" />
                             Run Auto

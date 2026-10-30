@@ -133,14 +133,14 @@ def test_clean_url_and_parse_browser_search_response():
     assert p1.name == "Jordan Lee"
     assert p1.profile_url == "https://www.linkedin.com/in/jordan-lee-ai-operations"
     assert "ChatGPT" in p1.evidence_text
-    assert p1.source == "Groq Web Search (A)"
+    assert p1.source == "Groq Browser Search"
     assert p1.raw_data.get("strategy_key") == "A"
     assert p1.email == "jordan.lee@example.com"
 
     p2 = profiles[1]
     assert p2.name == "Taylor Morgan"
     assert p2.profile_url == "https://taylormorgan.dev/about"
-    assert p2.source == "Groq Web Search (A)"
+    assert p2.source == "Groq Browser Search"
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ def test_search_orchestrator_xray_execution(temp_db):
                         name="Alex Mercer",
                         headline="Operations Specialist & ChatGPT Generalist",
                         profile_url="https://linkedin.com/in/alex-mercer-ops",
-                        source="Groq Web Search (Strategy A)",
+                        source="Groq Browser Search",
                         location="Remote, US",
                         evidence_text="Strong task execution and documentation skills",
                         email="alex@example.com",
@@ -224,7 +224,7 @@ def test_search_orchestrator_xray_execution(temp_db):
                     name="Alex Mercer",
                     headline="Operations Specialist & ChatGPT Generalist",
                     profile_url="https://linkedin.com/in/alex-mercer-ops",
-                    source="Groq Web Search (Strategy A)",
+                    source="Groq Browser Search",
                     location="Remote, US",
                     evidence_text="Strong task execution and documentation skills",
                     email="alex@example.com",
@@ -378,7 +378,7 @@ def test_api_groq_browser_smoke_endpoint(client):
                 name="Jane Doe",
                 headline="AI Operations Specialist",
                 profile_url="https://linkedin.com/in/jane-doe-ops",
-                source="Groq Web Search (Smoke Test)",
+                source="Groq Browser Search",
                 location="Remote, US",
                 evidence_text="Experienced prompt engineer",
             )

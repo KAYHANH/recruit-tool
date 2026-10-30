@@ -415,7 +415,7 @@ class SearchOrchestrator:
                     add_search_task(
                         conn=conn,
                         run_id=run_id,
-                        source="Groq Web Search",
+                        source="Groq Browser Search",
                         query_text=strat_val.get("query_text", ""),
                         strategy=strat_val.get("name", ""),
                         status="SKIPPED",
@@ -470,7 +470,7 @@ class SearchOrchestrator:
                             add_search_task(
                                 conn=conn,
                                 run_id=run_id,
-                                source=f"Groq Web Search ({s.key})",
+                                source=f"Groq Browser Search ({s.key})",
                                 query_text=s.query_text,
                                 strategy=s.name,
                                 status="SKIPPED",
@@ -499,7 +499,7 @@ class SearchOrchestrator:
                                 add_search_task(
                                     conn=conn,
                                     run_id=run_id,
-                                    source=f"Groq Web Search ({s.key})",
+                                    source=f"Groq Browser Search ({s.key})",
                                     query_text=s.query_text,
                                     strategy=s.name,
                                     status="RATE_LIMITED",
@@ -515,7 +515,7 @@ class SearchOrchestrator:
                                 "error": f"{reason_msg} ({wait_left}s remaining).",
                             }
                         else:
-                            prog.current_stage = f"Executing Consolidated Groq Web Search across {len(strats_to_run)} strategies"
+                            prog.current_stage = f"Executing Consolidated Groq Browser Search across {len(strats_to_run)} strategies"
                             prog.progress_percent = int(current_progress)
                             update_search_run(
                                 conn,
@@ -531,7 +531,7 @@ class SearchOrchestrator:
                                 t_id = add_search_task(
                                     conn=conn,
                                     run_id=run_id,
-                                    source=f"Groq Web Search ({s.key})",
+                                    source=f"Groq Browser Search ({s.key})",
                                     query_text=s.query_text,
                                     strategy=s.name,
                                     status="SEARCHING",
