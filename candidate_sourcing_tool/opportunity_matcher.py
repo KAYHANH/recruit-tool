@@ -135,10 +135,11 @@ class OpportunityMatcher:
         matched_langs: list[str] = []
         for l in opp_langs:
             l_lower = l.lower().strip()
-            if l_lower in cand_langs_lower or l_lower in cand_evidence or "english" in l_lower:
+            # Require candidate languages list, CV text, or evidence to actually document the language
+            if l_lower in cand_langs_lower or l_lower in cand_evidence:
                 matched_langs.append(l)
             else:
-                unknowns.append(f"Language proficiency in {l} not explicitly confirmed.")
+                unknowns.append(f"Language proficiency in '{l}' not explicitly documented on CV.")
 
         if opp_langs:
             lang_score = int(round((len(matched_langs) / len(opp_langs)) * 15))
@@ -147,7 +148,7 @@ class OpportunityMatcher:
 
         # 4. Location, Eligibility & Availability (Max 10 points)
         loc_score = 10
-        if "remote" in opp_loc_restr or "global" in opp_loc_restr:
+        if not opp_loc_restr or "remote" in opp_loc_restr or "global" in opp_loc_restr or "worldwide" in opp_loc_restr or "any" in opp_loc_restr:
             loc_score = 10
         elif cand_loc and cand_loc != "unknown":
             if any(part in cand_loc for part in opp_loc_restr.split()):
@@ -156,14 +157,18 @@ class OpportunityMatcher:
                 loc_score = 3
                 eligibility_concerns.append(f"Candidate location '{candidate.get('location')}' may conflict with restriction '{opportunity.get('location_restrictions')}'.")
         else:
-            loc_score = 6
-            unknowns.append("Specific geographic location and work authorization unknown.")
+            loc_score = 5
+            unknowns.append(f"Specific geographic location and work authorization unknown for '{opportunity.get('location_restrictions')}'.")
 
         # 5. Other Explicit Requirements & Verification Quality (Max 10 points)
-        other_score = 10
+        ver_score = 5 if opp_ver_status == "VERIFIED" else 2
         if opp_ver_status != "VERIFIED":
-            other_score = 2
             eligibility_concerns.append("Opportunity verification status is UNVERIFIED; human confirmation required before outreach.")
+
+        # Additional 5 points based on candidate permission and explicit criteria
+        perm = (candidate.get("contact_permission_basis") or "").lower()
+        perm_score = 5 if perm in ("approved_outreach", "direct_consent", "verified_permission", "public_cv_approved") else (3 if perm == "public_cv" else 1)
+        other_score = ver_score + perm_score
 
         total_score = min(100, skills_score + exp_score + lang_score + loc_score + other_score)
 

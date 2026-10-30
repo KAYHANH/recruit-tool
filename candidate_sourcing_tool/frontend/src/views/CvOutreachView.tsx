@@ -20,6 +20,9 @@ import {
   Edit3,
   Plus,
   Check,
+  Pause,
+  ShieldCheck,
+  LogOut,
 } from 'lucide-react';
 import { api } from '../api';
 import type {
@@ -141,11 +144,19 @@ export const CvOutreachView: React.FC = () => {
     }
   };
 
+  const loadGmailAuth = async () => {
+    try {
+      const auth = await api.getGmailAuthStatus();
+      setGmailAuth(auth);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const loadDrafts = async () => {
     try {
-      const [d, auth] = await Promise.all([api.getDrafts(), api.getGmailAuthStatus()]);
+      const [d] = await Promise.all([api.getDrafts(), loadGmailAuth()]);
       setDrafts(d);
-      setGmailAuth(auth);
     } catch (err) {
       console.error(err);
     }
@@ -187,6 +198,17 @@ export const CvOutreachView: React.FC = () => {
     return () => clearInterval(interval);
   }, [importJobs, selectedJob]);
 
+  // Listen for OAuth success popup messages
+  useEffect(() => {
+    const handleMsg = (e: MessageEvent) => {
+      if (e.data?.type === 'GMAIL_OAUTH_SUCCESS') {
+        loadGmailAuth();
+      }
+    };
+    window.addEventListener('message', handleMsg);
+    return () => window.removeEventListener('message', handleMsg);
+  }, []);
+
   // Folder Import Handler
   const handleStartFolderImport = async () => {
     if (!folderPath.trim()) {
@@ -197,13 +219,14 @@ export const CvOutreachView: React.FC = () => {
     setIsImporting(true);
     setImportMessage(null);
     try {
-      const res = await api.startFolderImport(folderPath.trim(), batchSize, false);
+      const res = await api.startFolderImport(folderPath.trim(), batchSize, true);
       setImportMessage({ text: res.message, type: 'success' });
       await loadJobs();
       await loadOverview();
       const updatedJob = await api.getImportJob(res.job_id);
       setSelectedJob(updatedJob);
       loadJobFiles(res.job_id);
+      setActiveTab('history');
     } catch (err: any) {
       setImportMessage({ text: err.message || 'Folder import failed.', type: 'error' });
     } finally {
@@ -219,13 +242,14 @@ export const CvOutreachView: React.FC = () => {
     setIsImporting(true);
     setImportMessage(null);
     try {
-      const res = await api.startZipImport(file, batchSize, false);
+      const res = await api.startZipImport(file, batchSize, true);
       setImportMessage({ text: res.message, type: 'success' });
       await loadJobs();
       await loadOverview();
       const updatedJob = await api.getImportJob(res.job_id);
       setSelectedJob(updatedJob);
       loadJobFiles(res.job_id);
+      setActiveTab('history');
     } catch (err: any) {
       setImportMessage({ text: err.message || 'ZIP import failed.', type: 'error' });
     } finally {
@@ -256,8 +280,35 @@ export const CvOutreachView: React.FC = () => {
       await api.cancelImportJob(jobId);
       await loadJobs();
       await loadOverview();
+      if (selectedJob?.job_id === jobId) {
+        setSelectedJob(await api.getImportJob(jobId));
+      }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handlePauseJob = async (jobId: string) => {
+    try {
+      await api.pauseImportJob(jobId);
+      await loadJobs();
+      if (selectedJob?.job_id === jobId) {
+        setSelectedJob(await api.getImportJob(jobId));
+      }
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleResumeJob = async (jobId: string) => {
+    try {
+      await api.resumeImportJob(jobId, batchSize);
+      await loadJobs();
+      if (selectedJob?.job_id === jobId) {
+        setSelectedJob(await api.getImportJob(jobId));
+      }
+    } catch (err: any) {
+      alert(err.message);
     }
   };
 
@@ -293,14 +344,26 @@ export const CvOutreachView: React.FC = () => {
         candidate_id: match.candidate_id,
         opportunity_id: match.opportunity_id,
         save_to_gmail: true,
-        mock_mode: true,
+        mock_mode: false,
       });
       alert(res.message || 'Draft prepared!');
       await loadDrafts();
       await loadOverview();
       setActiveTab('drafts');
     } catch (err: any) {
-      alert(`Draft creation error: ${err.message}`);
+      if (err.message?.includes('permission')) {
+        const approve = confirm(`${err.message}\n\nWould you like to approve contact permission for this candidate now?`);
+        if (approve) {
+          try {
+            await api.setCandidatePermissionBasis(match.candidate_id, 'approved_outreach');
+            await handleGenerateDraftFromMatch(match);
+          } catch (permErr: any) {
+            alert(permErr.message);
+          }
+        }
+      } else {
+        alert(`Draft creation error: ${err.message}`);
+      }
     }
   };
 
@@ -317,13 +380,56 @@ export const CvOutreachView: React.FC = () => {
         title: newOppTitle.trim(),
         url: newOppUrl.trim(),
         requirements: reqList,
-        verification_status: 'VERIFIED',
+        verification_status: 'UNVERIFIED',
       });
       setShowAddOppModal(false);
       setNewOppTitle('');
       setNewOppUrl('');
       await loadOpportunities();
       await loadOverview();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleVerifyOpportunity = async (oppId: number) => {
+    const notes = prompt('Enter verification notes / program documentation source:');
+    if (notes === null) return;
+    try {
+      await api.verifyOpportunity(oppId, 'VERIFIED', 'Recruiter manual audit', notes);
+      await loadOpportunities();
+      await loadOverview();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleApprovePermission = async (candidateId: number) => {
+    try {
+      await api.setCandidatePermissionBasis(candidateId, 'approved_outreach');
+      await loadCandidates();
+      alert('Contact permission approved for outreach.');
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    try {
+      const res = await api.getGmailAuthUrl();
+      if (res.auth_url) {
+        window.open(res.auth_url, '_blank', 'width=600,height=700');
+      }
+    } catch (err: any) {
+      alert(`Could not start Gmail OAuth: ${err.message}`);
+    }
+  };
+
+  const handleDisconnectGmail = async () => {
+    if (!confirm('Are you sure you want to disconnect Gmail? Stored credentials will be removed.')) return;
+    try {
+      await api.disconnectGmail();
+      await loadGmailAuth();
     } catch (err: any) {
       alert(err.message);
     }
@@ -365,7 +471,7 @@ export const CvOutreachView: React.FC = () => {
         subject: editSubject,
         body_text: editBody,
         save_to_gmail: true,
-        mock_mode: true,
+        mock_mode: false,
       });
       setEditingDraft(null);
       await loadDrafts();
@@ -714,6 +820,16 @@ export const CvOutreachView: React.FC = () => {
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
+                        {cand.contact_permission_basis !== 'approved_outreach' && (
+                          <button
+                            onClick={() => handleApprovePermission(cand.id)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-700 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-300 transition-all"
+                            title="Approve candidate contact permission for outreach drafts"
+                          >
+                            <ShieldCheck size={14} />
+                            Approve Permission
+                          </button>
+                        )}
                         <button
                           onClick={() => handleToggleOptOut(cand)}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-all ${
@@ -755,7 +871,13 @@ export const CvOutreachView: React.FC = () => {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider">{opp.platform}</span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 uppercase">
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                        opp.verification_status === 'VERIFIED'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-amber-500/20 text-amber-300'
+                      }`}
+                    >
                       {opp.verification_status}
                     </span>
                   </div>
@@ -777,6 +899,15 @@ export const CvOutreachView: React.FC = () => {
                         {opp.links[0].url}
                       </a>
                     </div>
+                  )}
+                  {opp.verification_status !== 'VERIFIED' && (
+                    <button
+                      onClick={() => handleVerifyOpportunity(opp.id)}
+                      className="mt-2 w-full py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 transition-all"
+                    >
+                      <ShieldCheck size={14} />
+                      Verify Opportunity
+                    </button>
                   )}
                 </div>
               </div>
@@ -1021,6 +1152,23 @@ export const CvOutreachView: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2">
+              {gmailAuth?.authenticated ? (
+                <button
+                  onClick={handleDisconnectGmail}
+                  className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all"
+                >
+                  <LogOut size={14} />
+                  Disconnect Gmail
+                </button>
+              ) : (
+                <button
+                  onClick={handleConnectGmail}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+                >
+                  <Mail size={14} />
+                  Connect Gmail (OAuth)
+                </button>
+              )}
               <a
                 href="https://mail.google.com/mail/u/0/#drafts"
                 target="_blank"
@@ -1058,10 +1206,16 @@ export const CvOutreachView: React.FC = () => {
                         className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                           d.status === 'CREATED_IN_GMAIL'
                             ? 'bg-emerald-500/20 text-emerald-300'
+                            : d.status === 'SIMULATED_DRAFT'
+                            ? 'bg-sky-500/20 text-sky-300'
                             : 'bg-amber-500/20 text-amber-300'
                         }`}
                       >
-                        {d.status}
+                        {d.status === 'CREATED_IN_GMAIL'
+                          ? 'Live Gmail Draft'
+                          : d.status === 'SIMULATED_DRAFT'
+                          ? 'Simulated Draft'
+                          : d.status}
                       </span>
                       {d.gmail_draft_id && (
                         <span className="text-[10px] bg-slate-900 text-slate-400 px-2 py-0.5 rounded border border-slate-800">
@@ -1232,13 +1386,40 @@ export const CvOutreachView: React.FC = () => {
 
                     <div className="flex items-center gap-2">
                       {selectedJob.status === 'PROCESSING' && (
-                        <button
-                          onClick={() => handleCancelJob(selectedJob.job_id)}
-                          className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5"
-                        >
-                          <StopCircle size={14} />
-                          Cancel
-                        </button>
+                        <>
+                          <button
+                            onClick={() => handlePauseJob(selectedJob.job_id)}
+                            className="bg-amber-950/40 hover:bg-amber-900/60 border border-amber-800 text-amber-300 px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Pause size={14} />
+                            Pause
+                          </button>
+                          <button
+                            onClick={() => handleCancelJob(selectedJob.job_id)}
+                            className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <StopCircle size={14} />
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                      {selectedJob.status === 'PAUSED' && (
+                        <>
+                          <button
+                            onClick={() => handleResumeJob(selectedJob.job_id)}
+                            className="bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-800 text-emerald-300 px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Play size={14} />
+                            Resume
+                          </button>
+                          <button
+                            onClick={() => handleCancelJob(selectedJob.job_id)}
+                            className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 px-3 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <StopCircle size={14} />
+                            Cancel
+                          </button>
+                        </>
                       )}
                       {(selectedJob.status === 'PARTIAL' || selectedJob.status === 'FAILED') && (
                         <button

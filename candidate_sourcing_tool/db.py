@@ -2379,6 +2379,14 @@ def get_outreach_draft(conn: sqlite3.Connection, draft_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_draft_by_idempotency_key(conn: sqlite3.Connection, idempotency_key: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM referral_outreach_drafts WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def update_draft_status(
     conn: sqlite3.Connection,
     draft_id: int,

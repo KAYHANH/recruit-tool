@@ -29,18 +29,25 @@ logger = logging.getLogger("cv_import_manager")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 
+# ZIP Bomb & Payload Safeguards
+MAX_ZIP_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB max compressed archive
+MAX_TOTAL_EXPANDED_SIZE = 1024 * 1024 * 1024  # 1 GB max uncompressed total
+MAX_PER_FILE_SIZE = 50 * 1024 * 1024  # 50 MB max per single CV file
+MAX_FILE_COUNT = 2500  # 2500 files max per archive
+
 
 class CVImportManager:
     """Manages bulk CV import tasks with persistent queue state in SQLite."""
 
     def __init__(self):
         self._cancel_flags: dict[str, bool] = {}
+        self._pause_flags: dict[str, bool] = {}
 
     def cancel_job(self, conn: sqlite3.Connection, job_id: str) -> bool:
         """Signals an in-progress import job to cancel gracefully."""
         self._cancel_flags[job_id] = True
         job = get_cv_import_job(conn, job_id)
-        if job and job["status"] in ("QUEUED", "PROCESSING"):
+        if job and job["status"] in ("QUEUED", "PROCESSING", "PAUSED"):
             update_cv_import_job(
                 conn,
                 job_id,
@@ -50,6 +57,43 @@ class CVImportManager:
             )
             return True
         return False
+
+    def pause_job(self, conn: sqlite3.Connection, job_id: str) -> bool:
+        """Signals an in-progress import job to pause after current batch completes."""
+        self._pause_flags[job_id] = True
+        job = get_cv_import_job(conn, job_id)
+        if job and job["status"] == "PROCESSING":
+            update_cv_import_job(conn, job_id, status="PAUSED")
+            return True
+        return False
+
+    def resume_job(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+        batch_size: int = 15,
+        run_async: bool = True,
+    ) -> bool:
+        """Resumes processing a paused import job."""
+        job = get_cv_import_job(conn, job_id)
+        if not job or job["status"] not in ("PAUSED", "QUEUED"):
+            return False
+
+        self._pause_flags[job_id] = False
+        self._cancel_flags[job_id] = False
+        update_cv_import_job(conn, job_id, status="PROCESSING")
+
+        if run_async:
+            db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+            worker_thread = threading.Thread(
+                target=self._run_job_worker,
+                args=(db_path, job_id, batch_size),
+                daemon=True,
+            )
+            worker_thread.start()
+        else:
+            self._process_job_loop(conn, job_id, batch_size=batch_size)
+        return True
 
     def scan_folder_for_cvs(self, folder_path: Path | str) -> list[Path]:
         """Recursively finds all supported CV files in a given directory."""
@@ -116,25 +160,55 @@ class CVImportManager:
         zip_filename: str,
         extract_to_dir: Path | str,
         batch_size: int = 15,
-        run_async: bool = False,
+        run_async: bool = True,
     ) -> str:
-        """Extracts a ZIP archive into a managed local folder and starts import."""
+        """Extracts a ZIP archive into a managed local folder with ZIP-bomb protection and starts import."""
+        if len(zip_bytes) > MAX_ZIP_ARCHIVE_SIZE:
+            raise ValueError(
+                f"Uploaded archive ({len(zip_bytes) // (1024 * 1024)} MB) exceeds maximum allowed ZIP size ({MAX_ZIP_ARCHIVE_SIZE // (1024 * 1024)} MB)."
+            )
+
         dest = Path(extract_to_dir).resolve() / f"zip_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         dest.mkdir(parents=True, exist_ok=True)
 
+        total_expanded_bytes = 0
+        extracted_file_count = 0
+
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            for member in zf.infolist():
+            members = zf.infolist()
+            if len(members) > MAX_FILE_COUNT:
+                raise ValueError(
+                    f"Archive contains {len(members)} files, which exceeds maximum safety limit of {MAX_FILE_COUNT} files."
+                )
+
+            for member in members:
                 # Prevent zip-slip directory traversal
                 member_path = Path(member.filename)
                 if member_path.is_absolute() or ".." in member_path.parts:
                     continue
                 if member.filename.endswith("/"):
                     continue
+
+                if member.file_size > MAX_PER_FILE_SIZE:
+                    raise ValueError(
+                        f"Archive file '{member.filename}' ({member.file_size // (1024 * 1024)} MB) exceeds single file limit of {MAX_PER_FILE_SIZE // (1024 * 1024)} MB."
+                    )
+
+                total_expanded_bytes += member.file_size
+                if total_expanded_bytes > MAX_TOTAL_EXPANDED_SIZE:
+                    raise ValueError(
+                        f"Total uncompressed ZIP size exceeds safety limit of {MAX_TOTAL_EXPANDED_SIZE // (1024 * 1024)} MB (Potential ZIP bomb detected)."
+                    )
+
                 ext = member_path.suffix.lower()
                 if ext in SUPPORTED_EXTENSIONS:
                     target = dest / member_path.name
                     with zf.open(member) as src, open(target, "wb") as dst:
-                        dst.write(src.read())
+                        shutil.copyfileobj(src, dst)
+                    extracted_file_count += 1
+
+        if extracted_file_count == 0:
+            raise ValueError(f"No supported CV files ({', '.join(SUPPORTED_EXTENSIONS)}) found in uploaded ZIP archive.")
 
         return self.start_folder_import(conn, dest, batch_size=batch_size, run_async=run_async)
 
@@ -189,6 +263,12 @@ class CVImportManager:
                     status="CANCELLED",
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
+                break
+
+            # Check pause request
+            if self._pause_flags.get(job_id, False):
+                update_cv_import_job(conn, job_id, status="PAUSED")
+                logger.info("Import job %s paused cleanly.", job_id)
                 break
 
             # Fetch a small batch of QUEUED files

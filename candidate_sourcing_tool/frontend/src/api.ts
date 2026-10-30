@@ -537,7 +537,7 @@ export const api = {
   },
 
   // CV Import & Referral Outreach
-  async startFolderImport(folderPath: string, batchSize: number = 15, runAsync: boolean = false): Promise<{
+  async startFolderImport(folderPath: string, batchSize: number = 15, runAsync: boolean = true): Promise<{
     success: boolean;
     job_id: string;
     status: string;
@@ -552,7 +552,7 @@ export const api = {
     return handleResponse(res);
   },
 
-  async startZipImport(file: File, batchSize: number = 15, runAsync: boolean = false): Promise<{
+  async startZipImport(file: File, batchSize: number = 15, runAsync: boolean = true): Promise<{
     success: boolean;
     job_id: string;
     status: string;
@@ -585,6 +585,20 @@ export const api = {
 
   async cancelImportJob(jobId: string): Promise<{ success: boolean; job_id: string; message: string }> {
     const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
+  async pauseImportJob(jobId: string): Promise<{ success: boolean; job_id: string; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/pause`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
+  async resumeImportJob(jobId: string, batchSize: number = 15): Promise<{ success: boolean; job_id: string; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/resume?batch_size=${batchSize}&run_async=true`, {
       method: 'POST',
     });
     return handleResponse(res);
@@ -653,6 +667,15 @@ export const api = {
     return handleResponse(res);
   },
 
+  async verifyOpportunity(opportunityId: number, status: string = 'VERIFIED', source: string = 'Recruiter manual check', notes: string = ''): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/opportunities/${opportunityId}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verification_status: status, verification_source: source, verification_notes: notes }),
+    });
+    return handleResponse(res);
+  },
+
   async addReferralLink(opportunityId: number, url: string, ownerLabel: string = 'Recruiter Link', eligibilityNotes: string = ''): Promise<any> {
     const res = await fetch(`${BASE_URL}/api/referrals/opportunities/${opportunityId}/links`, {
       method: 'POST',
@@ -693,6 +716,18 @@ export const api = {
     return handleResponse<GmailAuthStatus>(res);
   },
 
+  async getGmailAuthUrl(): Promise<{ success: boolean; auth_url: string }> {
+    const res = await fetch(`${BASE_URL}/api/gmail/auth-url`);
+    return handleResponse<{ success: boolean; auth_url: string }>(res);
+  },
+
+  async disconnectGmail(): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/gmail/disconnect`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
   async previewDraft(candidateId: number, opportunityId: number, referralLinkId?: number): Promise<any> {
     const res = await fetch(`${BASE_URL}/api/referrals/drafts/preview`, {
       method: 'POST',
@@ -720,7 +755,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         save_to_gmail: true,
-        mock_mode: true,
+        mock_mode: false,
         ...data,
       }),
     });

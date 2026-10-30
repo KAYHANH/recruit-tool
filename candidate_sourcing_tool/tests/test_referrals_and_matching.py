@@ -154,10 +154,10 @@ class TestReferralMatchingAndDrafts(unittest.TestCase):
         self.assertIn("no verified email", str(ctx.exception).lower())
 
     def test_draft_idempotency_and_no_send(self):
-        """Verifies draft creation persists idempotency key and never calls send endpoints."""
+        """Verifies draft creation persists idempotency key and clearly marks simulated vs live status."""
         cur = self.conn.execute(
-            """INSERT INTO candidates(name, email, skills, years_of_experience, opt_out_status, evidence_text, created_at)
-            VALUES('Sara Connor', 'sara@skytech.io', '["python", "react"]', 4, 0, 'Python and React', '2026-10-30')"""
+            """INSERT INTO candidates(name, email, skills, years_of_experience, opt_out_status, contact_permission_basis, evidence_text, created_at)
+            VALUES('Sara Connor', 'sara@skytech.io', '["python", "react"]', 4, 0, 'approved_outreach', 'Python and React', '2026-10-30')"""
         )
         cand_id = cur.lastrowid
 
@@ -169,9 +169,10 @@ class TestReferralMatchingAndDrafts(unittest.TestCase):
             mock_mode=True,
         )
 
-        self.assertTrue(res1["is_saved_in_gmail"])
+        self.assertFalse(res1["is_saved_in_gmail"])
+        self.assertTrue(res1["is_simulated"])
         self.assertTrue(res1["gmail_draft_id"].startswith("mock_draft_"))
-        self.assertEqual(res1["status"], "CREATED_IN_GMAIL")
+        self.assertEqual(res1["status"], "SIMULATED_DRAFT")
 
         # Second call with same candidate and opportunity updates the existing draft rather than duplicating
         res2 = gmail_outreach.prepare_and_save_draft_record(
@@ -185,6 +186,34 @@ class TestReferralMatchingAndDrafts(unittest.TestCase):
         self.assertEqual(res1["idempotency_key"], res2["idempotency_key"])
         drafts = list_outreach_drafts(self.conn)
         self.assertEqual(len(drafts), 1)
+
+    def test_permission_and_email_gating(self):
+        """Verifies that unverified permission or invalid email blocks draft generation."""
+        cur = self.conn.execute(
+            """INSERT INTO candidates(name, email, skills, contact_permission_basis, evidence_text, created_at)
+            VALUES('Unverified User', 'user@domain.com', '["python"]', 'unverified', 'Evidence', '2026-10-30')"""
+        )
+        cand_unverified = cur.lastrowid
+        with self.assertRaises(ValueError) as ctx:
+            gmail_outreach.prepare_and_save_draft_record(
+                conn=self.conn,
+                candidate_id=cand_unverified,
+                opportunity_id=self.turing_opp["id"],
+            )
+        self.assertIn("Contact permission", str(ctx.exception))
+
+        cur2 = self.conn.execute(
+            """INSERT INTO candidates(name, email, skills, contact_permission_basis, evidence_text, created_at)
+            VALUES('No Email User', '', '["python"]', 'approved_outreach', 'Evidence', '2026-10-30')"""
+        )
+        cand_no_email = cur2.lastrowid
+        with self.assertRaises(ValueError) as ctx2:
+            gmail_outreach.prepare_and_save_draft_record(
+                conn=self.conn,
+                candidate_id=cand_no_email,
+                opportunity_id=self.turing_opp["id"],
+            )
+        self.assertIn("no verified email address", str(ctx2.exception))
 
     def test_strict_no_send_endpoint_guarantee(self):
         """Verifies that no automatic message sending methods or endpoints exist in the module."""

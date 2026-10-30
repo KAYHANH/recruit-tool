@@ -90,7 +90,7 @@ class CVDeduplicator:
                 )
 
         # 3. Level 3: Ambiguous Identity Check (Same Name, Different / Missing Email)
-        if parsed.name and parsed.name.lower() != "candidate":
+        if parsed.name and parsed.name.lower() not in ("candidate", "curriculum vitae", "resume"):
             row_same_name = conn.execute(
                 "SELECT id, name, email, normalized_email FROM candidates WHERE LOWER(name) = ? LIMIT 1",
                 (parsed.name.strip().lower(),),
@@ -98,7 +98,7 @@ class CVDeduplicator:
 
             if row_same_name:
                 existing_same_name = dict(row_same_name)
-                # If existing candidate has an email, but parsed CV has a DIFFERENT email:
+                # If existing candidate has an email, and parsed CV has a DIFFERENT email:
                 if parsed.normalized_email and existing_same_name.get("email"):
                     existing_norm = (existing_same_name.get("normalized_email") or existing_same_name.get("email", "")).lower().strip()
                     if parsed.normalized_email != existing_norm:
@@ -107,7 +107,26 @@ class CVDeduplicator:
                             "Ambiguous identity: Same name '%s' but different emails ('%s' vs '%s'). Keeping separate.",
                             parsed.name, parsed.normalized_email, existing_norm
                         )
-                        return self._create_new_candidate(conn, parsed, notes="Ambiguous name match - separated due to distinct email.")
+                        return self._create_new_candidate(
+                            conn,
+                            parsed,
+                            notes=f"Ambiguous name match with Candidate #{existing_same_name['id']} ('{existing_same_name.get('name')}') - separated due to distinct email.",
+                            status="Needs Review",
+                            permission_basis="unverified_ambiguous",
+                        )
+                elif not parsed.normalized_email or not existing_same_name.get("email"):
+                    # One or both lack verified email - flag for ambiguity review
+                    logger.info(
+                        "Ambiguous identity: Same name '%s' with unverified email on one or both profiles. Flagging for review.",
+                        parsed.name
+                    )
+                    return self._create_new_candidate(
+                        conn,
+                        parsed,
+                        notes=f"Ambiguous identity: Same name as existing Candidate #{existing_same_name['id']} ('{existing_same_name.get('name')}'), but email is unverified on one or both records. Recruiter manual review required.",
+                        status="Needs Review",
+                        permission_basis="unverified_ambiguous",
+                    )
 
         # 4. Level 4: Create Brand New Candidate Record
         return self._create_new_candidate(conn, parsed)
@@ -177,6 +196,8 @@ class CVDeduplicator:
         conn: sqlite3.Connection,
         parsed: ParsedCV,
         notes: str = "",
+        status: str = "New",
+        permission_basis: str = "public_cv",
     ) -> DeduplicationResult:
         """Inserts a brand new canonical candidate and associated candidate_file."""
         now_iso = datetime.now().isoformat(timespec="seconds")
@@ -198,7 +219,7 @@ class CVDeduplicator:
                 contact_permission_basis, opt_out_status, suppression_reason,
                 resume_text, resume_filename, resume_source, resume_uploaded_at,
                 added_by, evidence_ladder_tier
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'New', ?, ?, ?, ?, ?, ?, 'public_cv', 0, '', ?, ?, 'CV Upload', ?, 'Bulk CV Importer', 'Tier 1: Document CV')""",
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, 'CV Upload', ?, 'Bulk CV Importer', 'Tier 1: Document CV')""",
             (
                 name,
                 f"file://local-cv/{parsed.file_hash[:12]}",
@@ -209,12 +230,14 @@ class CVDeduplicator:
                 evidence,
                 notes,
                 now_iso,
+                status,
                 email,
                 phone,
                 norm_email,
                 skills_json,
                 langs_json,
                 parsed.years_of_experience,
+                permission_basis,
                 parsed.cleaned_text[:4000],
                 parsed.file_name,
                 now_iso,

@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +28,7 @@ import urllib.error
 from db import (
     create_or_update_draft,
     get_candidate,
+    get_draft_by_idempotency_key,
     get_outreach_draft,
     get_referral_opportunity,
     list_referral_links,
@@ -53,6 +55,102 @@ class GmailOutreachManager:
     def __init__(self):
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
 
+    def get_oauth_credentials(self) -> tuple[str, str]:
+        """Resolves client ID and client secret from environment or credentials.json."""
+        client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+        if client_id and client_secret:
+            return client_id, client_secret
+
+        if CREDENTIALS_FILE.exists():
+            try:
+                with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                info = data.get("installed") or data.get("web") or data
+                return info.get("client_id", "").strip(), info.get("client_secret", "").strip()
+            except Exception as exc:
+                logger.warning("Failed to parse credentials.json: %s", exc)
+        return "", ""
+
+    def get_authorization_url(self, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> str:
+        """Constructs Google OAuth 2.0 URL strictly requesting compose (draft-only) scope."""
+        client_id, _ = self.get_oauth_credentials()
+        if not client_id:
+            raise RuntimeError("Google Client ID not configured. Please supply GOOGLE_CLIENT_ID or credentials.json.")
+
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": GMAIL_COMPOSE_SCOPE,
+            "access_type": "offline",
+            "prompt": "consent",
+        }
+        return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+    def exchange_code_for_tokens(self, code: str, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> dict[str, Any]:
+        """Exchanges an authorization code for access and refresh tokens."""
+        client_id, client_secret = self.get_oauth_credentials()
+        if not client_id or not client_secret:
+            raise RuntimeError("Missing Google Client ID or Client Secret.")
+
+        post_body = urllib.parse.urlencode({
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=post_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        # Save tokens
+        token_payload = {
+            "access_token": data.get("access_token"),
+            "refresh_token": data.get("refresh_token"),
+            "expires_at": time.time() + (data.get("expires_in") or 3600),
+            "scope": data.get("scope", GMAIL_COMPOSE_SCOPE),
+            "email": "Connected Recruiter",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        # Try to resolve user's email address if available
+        try:
+            profile_req = urllib.request.Request(
+                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                headers={"Authorization": f"Bearer {data.get('access_token')}"},
+            )
+            with urllib.request.urlopen(profile_req, timeout=10) as prof_resp:
+                prof_data = json.loads(prof_resp.read().decode("utf-8"))
+                if prof_data.get("emailAddress"):
+                    token_payload["email"] = prof_data["emailAddress"]
+        except Exception:
+            pass
+
+        self.save_tokens(token_payload)
+        return token_payload
+
+    def save_tokens(self, token_data: dict[str, Any]) -> None:
+        """Persists OAuth tokens to local secure storage."""
+        TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(token_data, f, indent=2)
+
+    def disconnect(self) -> bool:
+        """Safely removes stored OAuth tokens and disconnects Gmail."""
+        if TOKEN_FILE.exists():
+            TOKEN_FILE.unlink()
+            return True
+        return False
+
     def is_authenticated(self) -> bool:
         """Checks if a valid or refreshable Gmail OAuth token exists."""
         if not TOKEN_FILE.exists():
@@ -68,6 +166,7 @@ class GmailOutreachManager:
         """Returns detailed OAuth connectivity status."""
         authenticated = self.is_authenticated()
         token_info = {}
+        client_id, _ = self.get_oauth_credentials()
         if authenticated:
             try:
                 with open(TOKEN_FILE, "r", encoding="utf-8") as f:
@@ -76,6 +175,7 @@ class GmailOutreachManager:
                     "has_refresh_token": bool(data.get("refresh_token")),
                     "scope": data.get("scope", GMAIL_COMPOSE_SCOPE),
                     "email": data.get("email", "Connected Recruiter"),
+                    "expires_at": data.get("expires_at"),
                 }
             except Exception:
                 pass
@@ -84,9 +184,13 @@ class GmailOutreachManager:
             "authenticated": authenticated,
             "scope": GMAIL_COMPOSE_SCOPE,
             "token_file_present": TOKEN_FILE.exists(),
-            "credentials_file_present": CREDENTIALS_FILE.exists(),
+            "credentials_configured": bool(client_id),
             "details": token_info,
-            "message": "Gmail OAuth is connected and ready for draft creation." if authenticated else "Gmail not connected. Please provide credentials.json or complete OAuth flow.",
+            "message": (
+                f"Gmail OAuth is connected ({token_info.get('email', 'Active')}). Ready for live draft generation."
+                if authenticated
+                else "Gmail not connected. Complete OAuth or use local preview/simulated drafts."
+            ),
         }
 
     def generate_draft_content(
@@ -195,7 +299,7 @@ class GmailOutreachManager:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 resp_data = json.loads(resp.read().decode("utf-8"))
                 draft_id = resp_data.get("id")
-                return draft_id
+                return str(draft_id)
         except urllib.error.HTTPError as err:
             err_body = err.read().decode("utf-8", errors="replace")
             logger.error("Gmail draft creation failed (%s): %s", err.code, err_body)
@@ -204,6 +308,111 @@ class GmailOutreachManager:
             logger.error("Network error communicating with Gmail: %s", exc)
             raise RuntimeError(f"Failed to connect to Gmail API: {exc}")
 
+    def update_gmail_draft(
+        self,
+        draft_id: str,
+        recipient_email: str,
+        subject: str,
+        body_text: str,
+        mock_mode: bool = False,
+    ) -> str:
+        """
+        Updates an existing draft in Gmail without creating duplicate draft items.
+        NEVER sends the email. Returns the updated draft ID.
+        """
+        if not draft_id:
+            return self.create_gmail_draft(recipient_email, subject, body_text, mock_mode=mock_mode)
+
+        if mock_mode or not self.is_authenticated() or draft_id.startswith("mock_draft_"):
+            logger.info("Simulated update of draft %s for %s", draft_id, recipient_email)
+            return draft_id
+
+        # Build RFC 2822 email message
+        msg = EmailMessage()
+        msg["To"] = recipient_email
+        msg["Subject"] = subject
+        msg.set_content(body_text)
+
+        raw_bytes = msg.as_bytes()
+        encoded_message = base64.urlsafe_b64encode(raw_bytes).decode("utf-8")
+
+        access_token = self._get_access_token()
+
+        req_payload = {
+            "id": draft_id,
+            "message": {
+                "raw": encoded_message
+            }
+        }
+
+        # Google Gmail REST API users.drafts.update endpoint (PUT)
+        url = f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(req_payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            method="PUT",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return str(resp_data.get("id") or draft_id)
+        except urllib.error.HTTPError as err:
+            err_body = err.read().decode("utf-8", errors="replace")
+            logger.error("Gmail draft update failed (%s): %s", err.code, err_body)
+            # If draft was deleted or not found on Gmail side, fall back to create new
+            if err.code == 404:
+                return self.create_gmail_draft(recipient_email, subject, body_text, mock_mode=False)
+            raise RuntimeError(f"Gmail API error {err.code}: {err_body}")
+        except Exception as exc:
+            logger.error("Network error updating Gmail draft: %s", exc)
+            raise RuntimeError(f"Failed to update Gmail draft: {exc}")
+
+    def refresh_access_token(self) -> str:
+        """Refreshes expired access token using stored refresh_token."""
+        if not TOKEN_FILE.exists():
+            raise RuntimeError("Gmail token file not found.")
+
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            token_data = json.load(f)
+
+        refresh_token = token_data.get("refresh_token")
+        if not refresh_token:
+            raise RuntimeError("No refresh token available. Re-authentication required.")
+
+        client_id, client_secret = self.get_oauth_credentials()
+        if not client_id or not client_secret:
+            raise RuntimeError("Missing Google Client ID or Client Secret.")
+
+        post_body = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=post_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            refresh_resp = json.loads(resp.read().decode("utf-8"))
+
+        token_data["access_token"] = refresh_resp["access_token"]
+        token_data["expires_at"] = time.time() + (refresh_resp.get("expires_in") or 3600)
+        token_data["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        self.save_tokens(token_data)
+        logger.info("Gmail OAuth access token successfully refreshed.")
+        return token_data["access_token"]
+
     def _get_access_token(self) -> str:
         """Retrieves or refreshes OAuth access token from local secure storage."""
         if not TOKEN_FILE.exists():
@@ -211,6 +420,12 @@ class GmailOutreachManager:
 
         with open(TOKEN_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # Check token expiration (refresh 60 seconds before expiry)
+        expires_at = data.get("expires_at", 0)
+        if expires_at and time.time() > (expires_at - 60):
+            if data.get("refresh_token"):
+                return self.refresh_access_token()
 
         token = data.get("access_token")
         if not token:
@@ -228,7 +443,7 @@ class GmailOutreachManager:
         save_to_gmail: bool = False,
         mock_mode: bool = False,
     ) -> dict[str, Any]:
-        """Prepares draft text, enforces idempotency, checks opt-out, and saves record."""
+        """Prepares draft text, enforces idempotency, checks permission, and saves record."""
         cand_raw = get_candidate(conn, candidate_id)
         if not cand_raw:
             raise ValueError(f"Candidate #{candidate_id} not found.")
@@ -238,8 +453,18 @@ class GmailOutreachManager:
         if cand.get("opt_out_status", 0) == 1:
             raise ValueError(f"Cannot create draft: Candidate #{candidate_id} ({cand.get('name')}) has opted out of outreach.")
 
-        if not cand.get("email"):
-            raise ValueError(f"Cannot create draft: Candidate #{candidate_id} has no verified email address.")
+        # Require explicit contact permission review
+        permission_basis = (cand.get("contact_permission_basis") or "").strip().lower()
+        if permission_basis in ("", "unverified", "pending_review", "unverified_ambiguous"):
+            raise ValueError(
+                f"Cannot create draft: Contact permission for Candidate #{candidate_id} ({cand.get('name')}) is '{permission_basis or 'unspecified'}'. "
+                f"Recruiter review and contact permission approval is required before outreach."
+            )
+
+        # Require verified recipient email
+        email_addr = (cand.get("email") or "").strip()
+        if not email_addr or "@" not in email_addr or "." not in email_addr.split("@")[-1]:
+            raise ValueError(f"Cannot create draft: Candidate #{candidate_id} has no verified email address ('{email_addr}').")
 
         opp = get_referral_opportunity(conn, opportunity_id)
         if not opp:
@@ -261,17 +486,38 @@ class GmailOutreachManager:
 
         idempotency_key = compute_draft_idempotency_key(candidate_id, opportunity_id)
 
-        gmail_draft_id = ""
+        # Check existing draft to prevent duplicate Gmail items
+        existing_draft = get_draft_by_idempotency_key(conn, idempotency_key)
+        existing_gmail_id = (existing_draft.get("gmail_draft_id") or "") if existing_draft else ""
+
+        gmail_draft_id = existing_gmail_id
         draft_status = "PENDING_REVIEW"
 
         if save_to_gmail:
-            gmail_draft_id = self.create_gmail_draft(
-                recipient_email=cand["email"],
-                subject=subject,
-                body_text=body_text,
-                mock_mode=mock_mode,
-            )
-            draft_status = "CREATED_IN_GMAIL"
+            if mock_mode or not self.is_authenticated():
+                # Clearly indicate simulated draft mode
+                if not gmail_draft_id or not gmail_draft_id.startswith("mock_draft_"):
+                    token_mock = hashlib.sha256(f"{email_addr}:{subject}".encode("utf-8")).hexdigest()[:16]
+                    gmail_draft_id = f"mock_draft_{token_mock}"
+                draft_status = "SIMULATED_DRAFT"
+            else:
+                # Live Gmail draft with duplicate prevention
+                if existing_gmail_id and not existing_gmail_id.startswith("mock_draft_"):
+                    # Update existing draft in Gmail
+                    gmail_draft_id = self.update_gmail_draft(
+                        draft_id=existing_gmail_id,
+                        recipient_email=email_addr,
+                        subject=subject,
+                        body_text=body_text,
+                    )
+                else:
+                    # Create new draft in Gmail
+                    gmail_draft_id = self.create_gmail_draft(
+                        recipient_email=email_addr,
+                        subject=subject,
+                        body_text=body_text,
+                    )
+                draft_status = "CREATED_IN_GMAIL"
 
         draft_id = create_or_update_draft(
             conn=conn,
@@ -279,7 +525,7 @@ class GmailOutreachManager:
             candidate_id=candidate_id,
             opportunity_id=opportunity_id,
             referral_link_id=referral_link_id,
-            recipient_email=cand["email"],
+            recipient_email=email_addr,
             subject=subject,
             body_text=body_text,
             gmail_draft_id=gmail_draft_id,
@@ -292,12 +538,13 @@ class GmailOutreachManager:
             "candidate_id": candidate_id,
             "candidate_name": cand.get("name"),
             "opportunity_title": opp.get("title"),
-            "recipient_email": cand["email"],
+            "recipient_email": email_addr,
             "subject": subject,
             "body_text": body_text,
             "gmail_draft_id": gmail_draft_id,
             "status": draft_status,
-            "is_saved_in_gmail": bool(gmail_draft_id),
+            "is_saved_in_gmail": bool(gmail_draft_id and not gmail_draft_id.startswith("mock_draft_")),
+            "is_simulated": bool(gmail_draft_id.startswith("mock_draft_")),
         }
 
 

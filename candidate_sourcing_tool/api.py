@@ -10,7 +10,7 @@ from typing import Any, Optional
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from db import (
@@ -1669,7 +1669,7 @@ async def restore_database_backup(file: UploadFile = File(...)) -> dict[str, Any
 class FolderImportRequest(BaseModel):
     folder_path: str
     batch_size: int = 15
-    run_async: bool = False
+    run_async: bool = True
 
 
 class CandidateOptOutRequest(BaseModel):
@@ -1715,7 +1715,7 @@ def import_cvs_from_folder(req: FolderImportRequest) -> dict[str, Any]:
 async def import_cvs_from_zip(
     file: UploadFile = File(...),
     batch_size: int = 15,
-    run_async: bool = False,
+    run_async: bool = True,
 ) -> dict[str, Any]:
     """Extracts a ZIP archive of CVs safely and processes them incrementally."""
     if not file.filename.lower().endswith(".zip"):
@@ -1782,6 +1782,24 @@ def cancel_import_job(job_id: str) -> dict[str, Any]:
     conn = get_db()
     ok = cv_import_manager.cancel_job(conn, job_id)
     return {"success": ok, "job_id": job_id, "message": "Job cancelled." if ok else "Job not running."}
+
+
+@app.post("/api/cv-import/jobs/{job_id}/pause")
+def pause_import_job(job_id: str) -> dict[str, Any]:
+    """Pauses an in-progress import job cleanly."""
+    conn = get_db()
+    ok = cv_import_manager.pause_job(conn, job_id)
+    return {"success": ok, "job_id": job_id, "message": "Import job paused." if ok else "Job not running."}
+
+
+@app.post("/api/cv-import/jobs/{job_id}/resume")
+def resume_import_job(job_id: str, batch_size: int = 15, run_async: bool = True) -> dict[str, Any]:
+    """Resumes a paused import job."""
+    conn = get_db()
+    ok = cv_import_manager.resume_job(conn, job_id, batch_size=batch_size, run_async=run_async)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Job is not in a paused state or cannot be resumed.")
+    return {"success": True, "job_id": job_id, "message": "Import job resumed."}
 
 
 @app.post("/api/cv-import/jobs/{job_id}/retry")
@@ -1973,26 +1991,113 @@ def get_opportunity(opportunity_id: int) -> dict[str, Any]:
     return opp
 
 
+class VerifyOpportunityRequest(BaseModel):
+    verification_status: str = "VERIFIED"
+    verification_source: str = "Recruiter manual check"
+    verification_notes: str = ""
+
+
+class OAuthCallbackRequest(BaseModel):
+    code: str
+    redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback"
+
+
+class SaveTokenRequest(BaseModel):
+    token_data: dict[str, Any]
+
+
 @app.post("/api/referrals/opportunities/{opportunity_id}/verify")
 def set_opportunity_verification(
     opportunity_id: int,
-    status: str = "VERIFIED",
-    source: str = "Recruiter manual check",
+    req: VerifyOpportunityRequest,
 ) -> dict[str, Any]:
-    """Updates verification status and source for an opportunity."""
+    """Updates verification status and source documentation for a referral opportunity."""
     conn = get_db()
     opp = get_referral_opportunity(conn, opportunity_id)
     if not opp:
         raise HTTPException(status_code=404, detail=f"Opportunity #{opportunity_id} not found.")
 
+    now_iso = datetime.now().isoformat(timespec="seconds") if req.verification_status == "VERIFIED" else ""
     update_referral_opportunity(
         conn,
         opportunity_id,
-        verification_status=status,
-        verification_source=source,
-        last_verified_at=datetime.now().isoformat(timespec="seconds"),
+        verification_status=req.verification_status,
+        verification_source=req.verification_source,
+        verification_notes=req.verification_notes,
+        last_verified_at=now_iso,
     )
-    return {"success": True, "opportunity_id": opportunity_id, "status": status}
+    return {"success": True, "opportunity_id": opportunity_id, "verification_status": req.verification_status}
+
+
+@app.get("/api/gmail/auth-url")
+def get_gmail_auth_url(redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> dict[str, Any]:
+    """Generates the Google OAuth 2.0 authorization URL for draft creation."""
+    try:
+        auth_url = gmail_outreach.get_authorization_url(redirect_uri=redirect_uri)
+        return {"success": True, "auth_url": auth_url}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/gmail/oauth/callback")
+def handle_gmail_oauth_callback(req: OAuthCallbackRequest) -> dict[str, Any]:
+    """Exchanges OAuth authorization code for live tokens."""
+    try:
+        tokens = gmail_outreach.exchange_code_for_tokens(req.code, redirect_uri=req.redirect_uri)
+        return {"success": True, "email": tokens.get("email"), "message": "Gmail OAuth successfully authenticated."}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"OAuth code exchange failed: {exc}")
+
+
+@app.get("/api/gmail/oauth/callback")
+def handle_gmail_oauth_callback_get(code: str, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback"):
+    """Handles browser redirect from Google OAuth consent screen."""
+    try:
+        gmail_outreach.exchange_code_for_tokens(code, redirect_uri=redirect_uri)
+        return HTMLResponse("""
+            <html>
+            <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f8fafc;">
+                <div style="max-width: 480px; margin: 40px auto; background: #1e293b; padding: 30px; border-radius: 16px; border: 1px solid #334155;">
+                    <div style="font-size: 40px; margin-bottom: 12px;">✅</div>
+                    <h2 style="color: #38bdf8; margin: 0 0 10px 0;">Gmail Connected Successfully!</h2>
+                    <p style="color: #94a3b8; font-size: 14px; line-height: 1.5;">Draft-only access granted. You can close this window and return to Candidate Finder.</p>
+                </div>
+                <script>
+                    if (window.opener) {
+                        window.opener.postMessage({ type: 'GMAIL_OAUTH_SUCCESS' }, '*');
+                        setTimeout(() => window.close(), 1500);
+                    } else {
+                        setTimeout(() => { window.location.href = '/'; }, 2000);
+                    }
+                </script>
+            </body>
+            </html>
+        """)
+    except Exception as exc:
+        return HTMLResponse(f"""
+            <html>
+            <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f8fafc;">
+                <div style="max-width: 480px; margin: 40px auto; background: #1e293b; padding: 30px; border-radius: 16px; border: 1px solid #ef4444;">
+                    <h2 style="color: #f87171;">OAuth Authentication Failed</h2>
+                    <p style="color: #94a3b8;">{exc}</p>
+                </div>
+            </body>
+            </html>
+        """, status_code=400)
+
+
+@app.post("/api/gmail/save-token")
+def save_gmail_token_manual(req: SaveTokenRequest) -> dict[str, Any]:
+    """Manually saves or updates token dictionary."""
+    gmail_outreach.save_tokens(req.token_data)
+    return {"success": True, "message": "Token saved."}
+
+
+@app.post("/api/gmail/disconnect")
+def disconnect_gmail() -> dict[str, Any]:
+    """Safely revokes/disconnects Gmail by removing stored local tokens."""
+    ok = gmail_outreach.disconnect()
+    return {"success": ok, "message": "Gmail disconnected successfully." if ok else "Gmail was not connected."}
 
 
 @app.post("/api/referrals/opportunities/{opportunity_id}/links")
