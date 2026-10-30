@@ -81,6 +81,24 @@ export const BulkReferralOutreachView: React.FC = () => {
     } catch(e) { setError(e instanceof Error ? e.message : 'Could not connect Gmail'); }
   };
 
+  const createAllDrafts = async () => {
+    if (!gmailConnected || eligible.length === 0) return;
+    if (!window.confirm(`Create Gmail drafts for ${eligible.length} eligible candidate/opportunity matches? No emails will be sent.`)) return;
+    setBusy(true); setError(''); setMessage('');
+    let created = 0; let failed = 0;
+    for (const m of eligible) {
+      try {
+        await request('/api/bulk-outreach/drafts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:m.candidate_id,opportunity_id:m.opportunity_id})});
+        created += 1;
+      } catch { failed += 1; }
+      setMessage(`Draft generation progress: ${created + failed}/${eligible.length} · Created ${created} · Failed ${failed}`);
+      await new Promise(resolve => window.setTimeout(resolve, 350));
+    }
+    await load();
+    setMessage(`Bulk draft run finished. Created: ${created}; failed: ${failed}. Nothing was sent.`);
+    setBusy(false);
+  };
+
   const createDraft = async (m:Match) => {
     setBusy(true); setError(''); setMessage('');
     try {
@@ -130,7 +148,7 @@ export const BulkReferralOutreachView: React.FC = () => {
       <div className="flex flex-wrap justify-between gap-3 items-center"><div className="flex items-center gap-2"><Mail size={19} className="text-cyan-400"/><h2 className="font-semibold">3. Gmail connection & draft review</h2></div><span className={gmailConnected?'text-emerald-400':'text-amber-400'}>{gmailConnected?'Connected':'Not connected'}</span></div>
       <p className="text-xs text-slate-400">OAuth requests Gmail compose access only. Drafts are created in Gmail; this application has no send-email action.</p>
       <button onClick={()=>void connectGmail()} className="px-4 py-2 rounded-lg border border-slate-700 hover:bg-slate-800 text-sm">Connect Gmail</button>
-      <div className="flex items-center gap-2 pt-2"><ShieldCheck size={17} className="text-emerald-400"/><h3 className="font-medium text-sm">Eligible candidate matches ({eligible.length})</h3></div>
+      <div className="flex items-center gap-2 pt-2"><ShieldCheck size={17} className="text-emerald-400"/><h3 className="font-medium text-sm">Eligible candidate matches ({eligible.length})</h3><button disabled={busy || !gmailConnected || eligible.length===0} onClick={()=>void createAllDrafts()} className="ml-auto px-3 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-xs font-semibold">Create all eligible drafts</button></div>
       <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead className="text-slate-400 border-b border-slate-800"><tr><th className="py-2 pr-3">Candidate</th><th className="py-2 pr-3">Opportunity</th><th className="py-2 pr-3">Fit</th><th className="py-2 pr-3">Evidence</th><th className="py-2">Action</th></tr></thead><tbody>{matches.map((m,i)=><tr key={m.candidate_id+'-'+m.opportunity_id} className="border-b border-slate-800/70"><td className="py-3 pr-3"><div>{m.name}</div><div className="text-slate-500">{m.email}</div></td><td className="py-3 pr-3">{m.platform}<div className="text-slate-500">{m.role_title}</div></td><td className="py-3 pr-3">{m.match_score}%</td><td className="py-3 pr-3 text-slate-400">{m.matched_skills.join(', ') || 'No matched skills'}</td><td className="py-3">{m.draft_exists?<span className="text-emerald-400">Draft exists</span>:m.eligible_for_draft?<button disabled={busy || !gmailConnected} onClick={()=>void createDraft(m)} className="px-2.5 py-1.5 rounded bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40">Create draft</button>:<span className="text-amber-400">Review contact basis</span>}</td></tr>)}</tbody></table></div>
       {matches.length===0 && <p className="text-sm text-slate-500">Import CVs and add verified opportunities to calculate matches.</p>}
     </section>
