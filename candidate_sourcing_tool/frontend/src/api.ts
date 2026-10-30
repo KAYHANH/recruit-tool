@@ -12,6 +12,14 @@ import type {
   PipelineData,
   FullCandidateProfile,
   XRaySearchPlan,
+  CVImportJob,
+  CVImportJobFile,
+  ReferralCandidate,
+  ReferralOpportunity,
+  CandidateOpportunityMatch,
+  OutreachDraft,
+  CVOutreachOverview,
+  GmailAuthStatus,
 } from './types';
 
 const BASE_URL = '';
@@ -524,6 +532,213 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(jobId ? { job_id: jobId } : {}),
+    });
+    return handleResponse(res);
+  },
+
+  // CV Import & Referral Outreach
+  async startFolderImport(folderPath: string, batchSize: number = 15, runAsync: boolean = false): Promise<{
+    success: boolean;
+    job_id: string;
+    status: string;
+    total_files: number;
+    message: string;
+  }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_path: folderPath, batch_size: batchSize, run_async: runAsync }),
+    });
+    return handleResponse(res);
+  },
+
+  async startZipImport(file: File, batchSize: number = 15, runAsync: boolean = false): Promise<{
+    success: boolean;
+    job_id: string;
+    status: string;
+    total_files: number;
+    message: string;
+  }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${BASE_URL}/api/cv-import/zip?batch_size=${batchSize}&run_async=${runAsync}`, {
+      method: 'POST',
+      body: formData,
+    });
+    return handleResponse(res);
+  },
+
+  async getImportJobs(limit: number = 50): Promise<CVImportJob[]> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs?limit=${limit}`);
+    return handleResponse<CVImportJob[]>(res);
+  },
+
+  async getImportJob(jobId: string): Promise<CVImportJob> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}`);
+    return handleResponse<CVImportJob>(res);
+  },
+
+  async getImportJobFiles(jobId: string, limit: number = 200, offset: number = 0): Promise<CVImportJobFile[]> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/files?limit=${limit}&offset=${offset}`);
+    return handleResponse<CVImportJobFile[]>(res);
+  },
+
+  async cancelImportJob(jobId: string): Promise<{ success: boolean; job_id: string; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
+  async retryImportJob(jobId: string, batchSize: number = 15): Promise<{ success: boolean; job_id: string; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/retry?batch_size=${batchSize}`, {
+      method: 'POST',
+    });
+    return handleResponse(res);
+  },
+
+  async getReferralCandidates(search: string = '', optOutOnly: boolean = false, limit: number = 100): Promise<ReferralCandidate[]> {
+    const url = new URL(`${window.location.origin}/api/referrals/candidates`);
+    if (search) url.searchParams.set('search', search);
+    if (optOutOnly) url.searchParams.set('opt_out_only', 'true');
+    url.searchParams.set('limit', limit.toString());
+    const res = await fetch(url.toString());
+    return handleResponse<ReferralCandidate[]>(res);
+  },
+
+  async setCandidateOptOut(candidateId: number, optOut: boolean, reason: string = ''): Promise<{
+    success: boolean;
+    candidate_id: number;
+    opt_out_status: number;
+    suppression_reason: string;
+    message: string;
+  }> {
+    const res = await fetch(`${BASE_URL}/api/referrals/candidates/${candidateId}/opt-out`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ opt_out: optOut, reason }),
+    });
+    return handleResponse(res);
+  },
+
+  async setCandidatePermissionBasis(candidateId: number, permissionBasis: string): Promise<{
+    success: boolean;
+    candidate_id: number;
+    permission_basis: string;
+  }> {
+    const res = await fetch(`${BASE_URL}/api/referrals/candidates/${candidateId}/permission`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permission_basis: permissionBasis }),
+    });
+    return handleResponse(res);
+  },
+
+  async getCVOutreachOverview(): Promise<CVOutreachOverview> {
+    const res = await fetch(`${BASE_URL}/api/referrals/overview`);
+    return handleResponse<CVOutreachOverview>(res);
+  },
+
+  async getReferralOpportunities(isActive: boolean = true): Promise<ReferralOpportunity[]> {
+    const res = await fetch(`${BASE_URL}/api/referrals/opportunities?is_active=${isActive}`);
+    return handleResponse<ReferralOpportunity[]>(res);
+  },
+
+  async createReferralOpportunity(data: Partial<ReferralOpportunity>): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/opportunities`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return handleResponse(res);
+  },
+
+  async addReferralLink(opportunityId: number, url: string, ownerLabel: string = 'Recruiter Link', eligibilityNotes: string = ''): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/opportunities/${opportunityId}/links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, owner_label: ownerLabel, eligibility_notes: eligibilityNotes }),
+    });
+    return handleResponse(res);
+  },
+
+  async evaluateMatches(minScore: number = 40): Promise<{ success: boolean; matches_evaluated: number; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/referrals/matches/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ min_score: minScore }),
+    });
+    return handleResponse(res);
+  },
+
+  async getMatches(opportunityId?: number, minScore?: number): Promise<CandidateOpportunityMatch[]> {
+    const url = new URL(`${window.location.origin}/api/referrals/matches`);
+    if (opportunityId) url.searchParams.set('opportunity_id', opportunityId.toString());
+    if (minScore !== undefined) url.searchParams.set('min_score', minScore.toString());
+    const res = await fetch(url.toString());
+    return handleResponse<CandidateOpportunityMatch[]>(res);
+  },
+
+  async updateMatchDecision(matchId: number, decision: string, notes: string = ''): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/matches/${matchId}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, notes }),
+    });
+    return handleResponse(res);
+  },
+
+  async getGmailAuthStatus(): Promise<GmailAuthStatus> {
+    const res = await fetch(`${BASE_URL}/api/gmail/auth-status`);
+    return handleResponse<GmailAuthStatus>(res);
+  },
+
+  async previewDraft(candidateId: number, opportunityId: number, referralLinkId?: number): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/drafts/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        candidate_id: candidateId,
+        opportunity_id: opportunityId,
+        referral_link_id: referralLinkId,
+      }),
+    });
+    return handleResponse(res);
+  },
+
+  async createDraft(data: {
+    candidate_id: number;
+    opportunity_id: number;
+    referral_link_id?: number;
+    subject?: string;
+    body_text?: string;
+    save_to_gmail?: boolean;
+    mock_mode?: boolean;
+  }): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/drafts/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        save_to_gmail: true,
+        mock_mode: true,
+        ...data,
+      }),
+    });
+    return handleResponse(res);
+  },
+
+  async getDrafts(status?: string): Promise<OutreachDraft[]> {
+    const url = new URL(`${window.location.origin}/api/referrals/drafts`);
+    if (status) url.searchParams.set('status', status);
+    const res = await fetch(url.toString());
+    return handleResponse<OutreachDraft[]>(res);
+  },
+
+  async updateDraftStatus(draftId: number, status: string): Promise<any> {
+    const res = await fetch(`${BASE_URL}/api/referrals/drafts/${draftId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
     });
     return handleResponse(res);
   },

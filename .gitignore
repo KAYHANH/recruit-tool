@@ -46,3 +46,19 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# CV Files, Uploads & Personal Candidate Data
+cvs/
+uploads/
+cv_uploads/
+*.pdf
+*.docx
+*.zip
+
+# OAuth Tokens & Google Credentials (NEVER PUSH)
+token.json
+tokens.json
+credentials.json
+client_secret*.json
+gmail_token*.json
+

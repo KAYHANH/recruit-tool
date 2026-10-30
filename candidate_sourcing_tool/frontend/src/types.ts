@@ -408,4 +408,146 @@ export interface XRaySearchPlan {
   batch_urls: string[];
 }
 
+export interface CandidateFile {
+  id: number;
+  candidate_id: number;
+  file_path: string;
+  file_name: string;
+  file_hash: string;
+  file_size: number;
+  file_type: string;
+  parsing_status: string;
+  parsing_error?: string;
+  created_at: string;
+  is_primary: number;
+}
+
+export interface CVImportJob {
+  id: number;
+  job_id: string;
+  source_type: string;
+  source_path: string;
+  status: string;
+  total_files: number;
+  processed_files: number;
+  successful_files: number;
+  failed_files: number;
+  duplicate_files: number;
+  new_candidates: number;
+  updated_candidates: number;
+  error_message?: string;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface CVImportJobFile {
+  id: number;
+  job_id: string;
+  file_path: string;
+  file_name: string;
+  file_size: number;
+  file_type: string;
+  status: string;
+  error_message?: string;
+  candidate_id?: number | null;
+  processed_at?: string;
+}
+
+export interface ReferralCandidate extends Candidate {
+  normalized_email?: string;
+  skills?: string[] | string;
+  skills_list?: string[];
+  languages?: string[];
+  contact_permission_basis?: string;
+  opt_out_status?: number;
+  suppression_reason?: string;
+  last_contacted_at?: string;
+  files?: CandidateFile[];
+  file_count?: number;
+}
+
+export interface ReferralOpportunity {
+  id: number;
+  platform: string;
+  title: string;
+  description: string;
+  url: string;
+  requirements: string[];
+  location_restrictions: string;
+  language_requirements: string[];
+  experience_years_min: number;
+  verification_status: string;
+  last_verified_at?: string;
+  verification_source?: string;
+  verification_notes?: string;
+  links?: Array<{ id: number; url: string; owner_label: string; eligibility_notes?: string }>;
+}
+
+export interface CandidateOpportunityMatch {
+  id: number;
+  candidate_id: number;
+  opportunity_id: number;
+  candidate_name: string;
+  candidate_email?: string;
+  candidate_phone?: string;
+  candidate_location?: string;
+  candidate_opt_out?: number;
+  opportunity_platform: string;
+  opportunity_title: string;
+  score: number;
+  score_breakdown: {
+    skills_score: number;
+    experience_score: number;
+    language_score: number;
+    location_score: number;
+    other_score: number;
+  };
+  matched_requirements: string[];
+  missing_requirements: string[];
+  contradictions: string[];
+  recommendation: string;
+  opportunity_verification_status: string;
+  reviewer_decision?: string;
+  reviewer_notes?: string;
+}
+
+export interface OutreachDraft {
+  id: number;
+  idempotency_key: string;
+  candidate_id: number;
+  opportunity_id: number;
+  candidate_name: string;
+  opportunity_platform: string;
+  opportunity_title: string;
+  referral_url?: string;
+  recipient_email: string;
+  subject: string;
+  body_text: string;
+  gmail_draft_id?: string;
+  status: string;
+  created_at: string;
+}
+
+export interface CVOutreachOverview {
+  total_imported_files: number;
+  total_candidates: number;
+  cv_candidates: number;
+  active_opportunities: number;
+  total_matches: number;
+  high_confidence_matches: number;
+  total_drafts: number;
+  drafts_created_in_gmail: number;
+  suppressed_candidates: number;
+}
+
+export interface GmailAuthStatus {
+  authenticated: boolean;
+  scope: string;
+  token_file_present: boolean;
+  credentials_file_present: boolean;
+  message: string;
+}
+
+
+
 

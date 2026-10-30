@@ -11,6 +11,7 @@ import {
   Briefcase,
   ChevronDown,
   Layers,
+  Mail,
 } from 'lucide-react';
 import type { Job } from '../types';
 
@@ -21,6 +22,7 @@ export type ViewType =
   | 'pipeline'
   | 'candidates'
   | 'shortlist'
+  | 'referrals'
   | 'data'
   | 'settings';
 
@@ -61,6 +63,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <CheckCircle2 size={18} />,
       badge: metrics?.shortlisted,
     },
+    { id: 'referrals', label: 'CV Outreach', icon: <Mail size={18} /> },
     { id: 'data', label: 'Data & Backups', icon: <Database size={18} /> },
     { id: 'settings', label: 'Settings', icon: <Settings size={18} /> },
   ];

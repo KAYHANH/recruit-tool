@@ -9,6 +9,7 @@ import { ShortlistView } from './views/ShortlistView';
 import { SavedJobsDataView } from './views/SavedJobsDataView';
 import { SettingsView } from './views/SettingsView';
 import { PipelineView } from './views/PipelineView';
+import { CvOutreachView } from './views/CvOutreachView';
 import { api } from './api';
 import type { DashboardMetrics, Job } from './types';
 
@@ -136,6 +137,8 @@ export const App: React.FC = () => {
             onSelectJob={(id) => setActiveJobId(id)}
           />
         )}
+
+        {currentView === 'referrals' && <CvOutreachView />}
 
         {currentView === 'settings' && <SettingsView />}
       </main>

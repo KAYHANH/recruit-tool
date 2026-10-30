@@ -118,6 +118,13 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
         _add_column_if_missing(conn, "candidates", "linkedin_url", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "candidates", "added_by", "TEXT DEFAULT 'System Auto-Sourcing'")
         _add_column_if_missing(conn, "candidates", "evidence_ladder_tier", "TEXT DEFAULT 'Tier 2: Moderate Technical Evidence'")
+        _add_column_if_missing(conn, "candidates", "normalized_email", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidates", "skills", "TEXT DEFAULT '[]'")
+        _add_column_if_missing(conn, "candidates", "languages", "TEXT DEFAULT '[]'")
+        _add_column_if_missing(conn, "candidates", "contact_permission_basis", "TEXT DEFAULT 'public_cv'")
+        _add_column_if_missing(conn, "candidates", "opt_out_status", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "candidates", "suppression_reason", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidates", "last_contacted_at", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "job_candidates", "match_score", "INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "job_candidates", "match_details", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "job_candidates", "status", "TEXT DEFAULT 'Sourced'")
@@ -224,7 +231,146 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
             FOREIGN KEY(job_id) REFERENCES jobs(id)
         )""")
 
+        # CV-to-Referral Outreach System Entities
+        conn.execute("""CREATE TABLE IF NOT EXISTS candidate_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_type TEXT NOT NULL,
+            extracted_text TEXT DEFAULT '',
+            parsing_status TEXT NOT NULL DEFAULT 'SUCCESS',
+            parsing_error TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            is_primary INTEGER DEFAULT 1,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_files_hash ON candidate_files(file_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_files_candidate ON candidate_files(candidate_id)")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS cv_import_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT UNIQUE NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'folder',
+            source_path TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'QUEUED',
+            total_files INTEGER DEFAULT 0,
+            processed_files INTEGER DEFAULT 0,
+            successful_files INTEGER DEFAULT 0,
+            failed_files INTEGER DEFAULT 0,
+            duplicate_files INTEGER DEFAULT 0,
+            new_candidates INTEGER DEFAULT 0,
+            updated_candidates INTEGER DEFAULT 0,
+            error_message TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT ''
+        )""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS cv_import_job_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            file_hash TEXT DEFAULT '',
+            file_size INTEGER DEFAULT 0,
+            file_type TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'QUEUED',
+            error_message TEXT DEFAULT '',
+            candidate_id INTEGER DEFAULT NULL,
+            processed_at TEXT DEFAULT '',
+            FOREIGN KEY(job_id) REFERENCES cv_import_jobs(job_id),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cv_job_files_job ON cv_import_job_files(job_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cv_job_files_status ON cv_import_job_files(status)")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS referral_opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            requirements TEXT NOT NULL DEFAULT '[]',
+            location_restrictions TEXT NOT NULL DEFAULT '',
+            language_requirements TEXT NOT NULL DEFAULT '[]',
+            experience_years_min INTEGER NOT NULL DEFAULT 0,
+            verification_status TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            last_verified_at TEXT DEFAULT '',
+            verification_source TEXT DEFAULT '',
+            verification_notes TEXT DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS referral_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opportunity_id INTEGER DEFAULT NULL,
+            platform TEXT NOT NULL,
+            url TEXT NOT NULL,
+            owner_label TEXT NOT NULL DEFAULT 'Default Recruiter',
+            eligibility_notes TEXT DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(opportunity_id) REFERENCES referral_opportunities(id)
+        )""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS candidate_opportunity_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            opportunity_id INTEGER NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0,
+            score_breakdown TEXT NOT NULL DEFAULT '{}',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            matched_requirements TEXT NOT NULL DEFAULT '[]',
+            missing_requirements TEXT NOT NULL DEFAULT '[]',
+            contradictions TEXT NOT NULL DEFAULT '[]',
+            recommendation TEXT NOT NULL DEFAULT 'Review',
+            opportunity_verification_status TEXT NOT NULL DEFAULT 'UNVERIFIED',
+            reviewer_decision TEXT DEFAULT '',
+            reviewer_notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT DEFAULT '',
+            UNIQUE(candidate_id, opportunity_id),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id),
+            FOREIGN KEY(opportunity_id) REFERENCES referral_opportunities(id)
+        )""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS referral_outreach_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idempotency_key TEXT UNIQUE NOT NULL,
+            candidate_id INTEGER NOT NULL,
+            opportunity_id INTEGER NOT NULL,
+            referral_link_id INTEGER DEFAULT NULL,
+            recipient_email TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            body_text TEXT NOT NULL,
+            body_html TEXT DEFAULT '',
+            gmail_draft_id TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+            created_at TEXT NOT NULL,
+            updated_at TEXT DEFAULT '',
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id),
+            FOREIGN KEY(opportunity_id) REFERENCES referral_opportunities(id),
+            FOREIGN KEY(referral_link_id) REFERENCES referral_links(id)
+        )""")
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS referral_outreach_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER DEFAULT NULL,
+            candidate_id INTEGER NOT NULL,
+            opportunity_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(draft_id) REFERENCES referral_outreach_drafts(id),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id),
+            FOREIGN KEY(opportunity_id) REFERENCES referral_opportunities(id)
+        )""")
+
     seed_candidate_experiences_if_empty(conn)
+    seed_default_opportunities_if_empty(conn)
     return conn
 
 
@@ -1583,4 +1729,696 @@ def seed_candidate_experiences_if_empty(conn: sqlite3.Connection) -> None:
                         exp.get("source", ""),
                     ),
                 )
+
+
+# ---------------------------------------------------------------------------
+# CV-to-Referral Outreach Database Accessors
+# ---------------------------------------------------------------------------
+
+def get_candidate_by_email(conn: sqlite3.Connection, email: str) -> dict | None:
+    norm_email = email.strip().lower()
+    if not norm_email:
+        return None
+    row = conn.execute(
+        "SELECT * FROM candidates WHERE LOWER(email) = ? OR LOWER(normalized_email) = ? LIMIT 1",
+        (norm_email, norm_email),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_candidate_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
+    stripped_name = name.strip()
+    if not stripped_name:
+        return None
+    row = conn.execute(
+        "SELECT * FROM candidates WHERE LOWER(name) = ? LIMIT 1",
+        (stripped_name.lower(),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def record_candidate_file(
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    file_path: str,
+    file_name: str,
+    file_hash: str,
+    file_size: int,
+    file_type: str,
+    extracted_text: str = "",
+    parsing_status: str = "SUCCESS",
+    parsing_error: str = "",
+    is_primary: int = 1,
+) -> int:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO candidate_files(
+            candidate_id, file_path, file_name, file_hash, file_size,
+            file_type, extracted_text, parsing_status, parsing_error, created_at, is_primary
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            candidate_id,
+            file_path,
+            file_name,
+            file_hash,
+            file_size,
+            file_type,
+            extracted_text,
+            parsing_status,
+            parsing_error,
+            now_iso,
+            is_primary,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_candidate_file_by_hash(conn: sqlite3.Connection, file_hash: str) -> dict | None:
+    if not file_hash:
+        return None
+    row = conn.execute(
+        "SELECT * FROM candidate_files WHERE file_hash = ? LIMIT 1",
+        (file_hash,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_candidate_files(conn: sqlite3.Connection, candidate_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM candidate_files WHERE candidate_id = ? ORDER BY id DESC",
+        (candidate_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_cv_import_job(
+    conn: sqlite3.Connection,
+    job_id: str,
+    source_type: str = "folder",
+    source_path: str = "",
+    total_files: int = 0,
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO cv_import_jobs(
+            job_id, source_type, source_path, status, total_files, created_at
+        ) VALUES(?, ?, ?, 'QUEUED', ?, ?)""",
+        (job_id, source_type, source_path, total_files, now_iso),
+    )
+    conn.commit()
+
+
+def update_cv_import_job(
+    conn: sqlite3.Connection,
+    job_id: str,
+    **kwargs,
+) -> None:
+    if not kwargs:
+        return
+    fields = []
+    values = []
+    for k, v in kwargs.items():
+        fields.append(f"{k} = ?")
+        values.append(v)
+    values.append(job_id)
+    sql = f"UPDATE cv_import_jobs SET {', '.join(fields)} WHERE job_id = ?"
+    conn.execute(sql, values)
+    conn.commit()
+
+
+def get_cv_import_job(conn: sqlite3.Connection, job_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM cv_import_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_cv_import_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM cv_import_jobs ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_cv_import_job_file(
+    conn: sqlite3.Connection,
+    job_id: str,
+    file_path: str,
+    file_name: str,
+    file_size: int = 0,
+    file_type: str = "",
+    file_hash: str = "",
+    status: str = "QUEUED",
+) -> int:
+    cur = conn.execute(
+        """INSERT INTO cv_import_job_files(
+            job_id, file_path, file_name, file_size, file_type, file_hash, status
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)""",
+        (job_id, file_path, file_name, file_size, file_type, file_hash, status),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_cv_import_job_file(
+    conn: sqlite3.Connection,
+    job_file_id: int,
+    status: str,
+    error_message: str = "",
+    candidate_id: int | None = None,
+    file_hash: str = "",
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """UPDATE cv_import_job_files
+        SET status = ?, error_message = ?, candidate_id = ?, file_hash = CASE WHEN ? != '' THEN ? ELSE file_hash END, processed_at = ?
+        WHERE id = ?""",
+        (status, error_message, candidate_id, file_hash, file_hash, now_iso, job_file_id),
+    )
+    conn.commit()
+
+
+def get_cv_import_job_files(conn: sqlite3.Connection, job_id: str, limit: int = 500, offset: int = 0) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM cv_import_job_files WHERE job_id = ? ORDER BY id ASC LIMIT ? OFFSET ?",
+        (job_id, limit, offset),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_candidate_contact_permission(
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    permission_basis: str,
+) -> None:
+    conn.execute(
+        "UPDATE candidates SET contact_permission_basis = ? WHERE id = ?",
+        (permission_basis, candidate_id),
+    )
+    conn.commit()
+
+
+def update_candidate_opt_out(
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    opt_out: bool,
+    reason: str = "",
+) -> None:
+    conn.execute(
+        "UPDATE candidates SET opt_out_status = ?, suppression_reason = ? WHERE id = ?",
+        (1 if opt_out else 0, reason, candidate_id),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Referral Opportunities, Links, Matches, and Drafts
+# ---------------------------------------------------------------------------
+
+def seed_default_opportunities_if_empty(conn: sqlite3.Connection) -> None:
+    """Seeds verified initial opportunities for Turing, Mercor, and micro1 if table is empty."""
+    count = conn.execute("SELECT count(*) FROM referral_opportunities").fetchone()[0]
+    if count > 0:
+        return
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    defaults = [
+        (
+            "Turing",
+            "Senior Fullstack & AI-Assisted Developer",
+            "High-impact remote engineering roles building scalable web and distributed cloud applications.",
+            "https://www.turing.com",
+            json.dumps(["python", "react", "typescript", "fastapi", "postgresql", "docker", "problem solving"]),
+            "Remote (Global)",
+            json.dumps(["English"]),
+            3,
+            "VERIFIED",
+            now_iso,
+            "Turing Developer Network Public Jobs",
+            "Verified developer network program offering verified remote developer engagements.",
+            1,
+            now_iso,
+            "https://turing.com/referrals/dev-portal",
+        ),
+        (
+            "Mercor",
+            "AI Engineer & LLM Specialist",
+            "Elite AI engineering, LLM benchmark evaluations, agent development, and fine-tuning roles.",
+            "https://mercor.com",
+            json.dumps(["python", "pytorch", "llm", "prompt engineering", "langchain", "fine-tuning", "machine learning"]),
+            "Remote (Global)",
+            json.dumps(["English"]),
+            2,
+            "VERIFIED",
+            now_iso,
+            "Mercor AI Platform Public Documentation",
+            "Direct AI specialist platform matching top technical talent with silicon valley AI projects.",
+            1,
+            now_iso,
+            "https://mercor.com/apply/ai-engineer",
+        ),
+        (
+            "micro1",
+            "Senior Software Engineer (Frontend / Fullstack)",
+            "World-class engineering opportunities with vetted global tech teams and high-growth venture backed startups.",
+            "https://www.micro1.ai",
+            json.dumps(["typescript", "react", "next.js", "node.js", "aws", "tailwind", "attention to detail"]),
+            "Remote (Global)",
+            json.dumps(["English"]),
+            3,
+            "VERIFIED",
+            now_iso,
+            "micro1 Talent Network Portal",
+            "Verified global developer network connecting vetted talent with US & European clients.",
+            1,
+            now_iso,
+            "https://micro1.ai/talents/apply",
+        ),
+    ]
+
+    for d in defaults:
+        cur = conn.execute(
+            """INSERT INTO referral_opportunities(
+                platform, title, description, url, requirements, location_restrictions,
+                language_requirements, experience_years_min, verification_status, last_verified_at,
+                verification_source, verification_notes, is_active, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            d[:14],
+        )
+        opp_id = cur.lastrowid
+        # Seed default referral link
+        conn.execute(
+            """INSERT INTO referral_links(
+                opportunity_id, platform, url, owner_label, eligibility_notes, is_active, created_at
+            ) VALUES(?, ?, ?, 'System Verified Link', 'General eligibility verified', 1, ?)""",
+            (opp_id, d[0], d[14], now_iso),
+        )
+    conn.commit()
+
+
+def list_referral_opportunities(conn: sqlite3.Connection, is_active: bool = True) -> list[dict]:
+    query = "SELECT * FROM referral_opportunities"
+    params = []
+    if is_active:
+        query += " WHERE is_active = 1"
+    query += " ORDER BY id ASC"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        for jf in ["requirements", "language_requirements"]:
+            try:
+                if d.get(jf) and isinstance(d[jf], str):
+                    d[jf] = json.loads(d[jf])
+            except Exception:
+                d[jf] = []
+        # Attach active referral links
+        links = conn.execute(
+            "SELECT * FROM referral_links WHERE opportunity_id = ? AND is_active = 1",
+            (d["id"],),
+        ).fetchall()
+        d["links"] = [dict(lnk) for lnk in links]
+        result.append(d)
+    return result
+
+
+def get_referral_opportunity(conn: sqlite3.Connection, opp_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM referral_opportunities WHERE id = ?",
+        (opp_id,),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    for jf in ["requirements", "language_requirements"]:
+        try:
+            if d.get(jf) and isinstance(d[jf], str):
+                d[jf] = json.loads(d[jf])
+        except Exception:
+            d[jf] = []
+    links = conn.execute(
+        "SELECT * FROM referral_links WHERE opportunity_id = ? AND is_active = 1",
+        (opp_id,),
+    ).fetchall()
+    d["links"] = [dict(lnk) for lnk in links]
+    return d
+
+
+def create_referral_opportunity(
+    conn: sqlite3.Connection,
+    platform: str,
+    title: str,
+    description: str = "",
+    url: str = "",
+    requirements: list[str] | None = None,
+    location_restrictions: str = "Remote (Global)",
+    language_requirements: list[str] | None = None,
+    experience_years_min: int = 0,
+    verification_status: str = "UNVERIFIED",
+    verification_source: str = "",
+    verification_notes: str = "",
+) -> int:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    req_json = json.dumps(requirements or [])
+    lang_json = json.dumps(language_requirements or ["English"])
+    cur = conn.execute(
+        """INSERT INTO referral_opportunities(
+            platform, title, description, url, requirements, location_restrictions,
+            language_requirements, experience_years_min, verification_status, last_verified_at,
+            verification_source, verification_notes, is_active, created_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+        (
+            platform.strip(),
+            title.strip(),
+            description.strip(),
+            url.strip(),
+            req_json,
+            location_restrictions.strip(),
+            lang_json,
+            experience_years_min,
+            verification_status,
+            now_iso if verification_status == "VERIFIED" else "",
+            verification_source.strip(),
+            verification_notes.strip(),
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def update_referral_opportunity(
+    conn: sqlite3.Connection,
+    opp_id: int,
+    **kwargs,
+) -> None:
+    if not kwargs:
+        return
+    fields = []
+    values = []
+    for k, v in kwargs.items():
+        if k in ("requirements", "language_requirements") and isinstance(v, list):
+            v = json.dumps(v)
+        fields.append(f"{k} = ?")
+        values.append(v)
+    values.append(opp_id)
+    sql = f"UPDATE referral_opportunities SET {', '.join(fields)} WHERE id = ?"
+    conn.execute(sql, values)
+    conn.commit()
+
+
+def create_referral_link(
+    conn: sqlite3.Connection,
+    opportunity_id: int | None,
+    platform: str,
+    url: str,
+    owner_label: str = "Default Recruiter",
+    eligibility_notes: str = "",
+) -> int:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO referral_links(
+            opportunity_id, platform, url, owner_label, eligibility_notes, is_active, created_at
+        ) VALUES(?, ?, ?, ?, ?, 1, ?)""",
+        (opportunity_id, platform.strip(), url.strip(), owner_label.strip(), eligibility_notes.strip(), now_iso),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_referral_links(conn: sqlite3.Connection, opp_id: int | None = None) -> list[dict]:
+    query = "SELECT * FROM referral_links WHERE is_active = 1"
+    params = []
+    if opp_id is not None:
+        query += " AND opportunity_id = ?"
+        params.append(opp_id)
+    query += " ORDER BY id DESC"
+    rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_candidate_match(
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    opportunity_id: int,
+    score: int,
+    score_breakdown: dict,
+    evidence: dict,
+    matched_requirements: list[str],
+    missing_requirements: list[str],
+    contradictions: list[str],
+    recommendation: str,
+    opportunity_verification_status: str = "VERIFIED",
+    reviewer_decision: str = "PENDING",
+    reviewer_notes: str = "",
+) -> int:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO candidate_opportunity_matches(
+            candidate_id, opportunity_id, score, score_breakdown, evidence,
+            matched_requirements, missing_requirements, contradictions,
+            recommendation, opportunity_verification_status, reviewer_decision,
+            reviewer_notes, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(candidate_id, opportunity_id) DO UPDATE SET
+            score = excluded.score,
+            score_breakdown = excluded.score_breakdown,
+            evidence = excluded.evidence,
+            matched_requirements = excluded.matched_requirements,
+            missing_requirements = excluded.missing_requirements,
+            contradictions = excluded.contradictions,
+            recommendation = excluded.recommendation,
+            opportunity_verification_status = excluded.opportunity_verification_status,
+            updated_at = excluded.updated_at""",
+        (
+            candidate_id,
+            opportunity_id,
+            score,
+            json.dumps(score_breakdown),
+            json.dumps(evidence),
+            json.dumps(matched_requirements),
+            json.dumps(missing_requirements),
+            json.dumps(contradictions),
+            recommendation,
+            opportunity_verification_status,
+            reviewer_decision,
+            reviewer_notes,
+            now_iso,
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_candidate_matches(
+    conn: sqlite3.Connection,
+    opportunity_id: int | None = None,
+    candidate_id: int | None = None,
+    min_score: int | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    query = """
+        SELECT
+            m.*,
+            c.name as candidate_name,
+            c.email as candidate_email,
+            c.phone as candidate_phone,
+            c.location as candidate_location,
+            c.opt_out_status as candidate_opt_out,
+            c.contact_permission_basis as candidate_permission_basis,
+            o.platform as opportunity_platform,
+            o.title as opportunity_title,
+            o.verification_status as opp_verification_status
+        FROM candidate_opportunity_matches m
+        JOIN candidates c ON m.candidate_id = c.id
+        JOIN referral_opportunities o ON m.opportunity_id = o.id
+        WHERE 1=1
+    """
+    params = []
+    if opportunity_id:
+        query += " AND m.opportunity_id = ?"
+        params.append(opportunity_id)
+    if candidate_id:
+        query += " AND m.candidate_id = ?"
+        params.append(candidate_id)
+    if min_score is not None:
+        query += " AND m.score >= ?"
+        params.append(min_score)
+    query += " ORDER BY m.score DESC, m.id DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        for jf in ["score_breakdown", "evidence", "matched_requirements", "missing_requirements", "contradictions"]:
+            try:
+                if d.get(jf) and isinstance(d[jf], str):
+                    d[jf] = json.loads(d[jf])
+            except Exception:
+                d[jf] = [] if "requirements" in jf or "contradictions" in jf else {}
+        result.append(d)
+    return result
+
+
+def update_match_reviewer_decision(
+    conn: sqlite3.Connection,
+    match_id: int,
+    decision: str,
+    notes: str = "",
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """UPDATE candidate_opportunity_matches
+        SET reviewer_decision = ?, reviewer_notes = ?, updated_at = ?
+        WHERE id = ?""",
+        (decision, notes, now_iso, match_id),
+    )
+    conn.commit()
+
+
+def create_or_update_draft(
+    conn: sqlite3.Connection,
+    idempotency_key: str,
+    candidate_id: int,
+    opportunity_id: int,
+    referral_link_id: int | None,
+    recipient_email: str,
+    subject: str,
+    body_text: str,
+    body_html: str = "",
+    gmail_draft_id: str = "",
+    status: str = "PENDING_REVIEW",
+) -> int:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO referral_outreach_drafts(
+            idempotency_key, candidate_id, opportunity_id, referral_link_id,
+            recipient_email, subject, body_text, body_html, gmail_draft_id,
+            status, created_at, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO UPDATE SET
+            subject = excluded.subject,
+            body_text = excluded.body_text,
+            body_html = excluded.body_html,
+            gmail_draft_id = CASE WHEN excluded.gmail_draft_id != '' THEN excluded.gmail_draft_id ELSE referral_outreach_drafts.gmail_draft_id END,
+            status = excluded.status,
+            updated_at = excluded.updated_at""",
+        (
+            idempotency_key,
+            candidate_id,
+            opportunity_id,
+            referral_link_id,
+            recipient_email,
+            subject,
+            body_text,
+            body_html,
+            gmail_draft_id,
+            status,
+            now_iso,
+            now_iso,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
+def list_outreach_drafts(
+    conn: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    query = """
+        SELECT
+            d.*,
+            c.name as candidate_name,
+            c.opt_out_status as candidate_opt_out,
+            o.platform as opportunity_platform,
+            o.title as opportunity_title,
+            l.url as referral_url
+        FROM referral_outreach_drafts d
+        JOIN candidates c ON d.candidate_id = c.id
+        JOIN referral_opportunities o ON d.opportunity_id = o.id
+        LEFT JOIN referral_links l ON d.referral_link_id = l.id
+        WHERE 1=1
+    """
+    params = []
+    if status:
+        query += " AND d.status = ?"
+        params.append(status)
+    query += " ORDER BY d.id DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_outreach_draft(conn: sqlite3.Connection, draft_id: int) -> dict | None:
+    row = conn.execute(
+        """SELECT
+            d.*,
+            c.name as candidate_name,
+            c.opt_out_status as candidate_opt_out,
+            o.platform as opportunity_platform,
+            o.title as opportunity_title,
+            l.url as referral_url
+        FROM referral_outreach_drafts d
+        JOIN candidates c ON d.candidate_id = c.id
+        JOIN referral_opportunities o ON d.opportunity_id = o.id
+        LEFT JOIN referral_links l ON d.referral_link_id = l.id
+        WHERE d.id = ?""",
+        (draft_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_draft_status(
+    conn: sqlite3.Connection,
+    draft_id: int,
+    status: str,
+    gmail_draft_id: str = "",
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    if gmail_draft_id:
+        conn.execute(
+            "UPDATE referral_outreach_drafts SET status = ?, gmail_draft_id = ?, updated_at = ? WHERE id = ?",
+            (status, gmail_draft_id, now_iso, draft_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE referral_outreach_drafts SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now_iso, draft_id),
+        )
+    conn.commit()
+
+
+def get_cv_outreach_overview_metrics(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Computes real-time overview metrics for the CV Outreach dashboard."""
+    files_count = conn.execute("SELECT count(*) FROM candidate_files").fetchone()[0]
+    total_candidates = conn.execute("SELECT count(*) FROM candidates").fetchone()[0]
+    cv_candidates = conn.execute("SELECT count(*) FROM candidates WHERE source = 'CV Upload'").fetchone()[0]
+    opportunities_count = conn.execute("SELECT count(*) FROM referral_opportunities WHERE is_active = 1").fetchone()[0]
+    matches_count = conn.execute("SELECT count(*) FROM candidate_opportunity_matches").fetchone()[0]
+    high_matches = conn.execute("SELECT count(*) FROM candidate_opportunity_matches WHERE score >= 65").fetchone()[0]
+    drafts_count = conn.execute("SELECT count(*) FROM referral_outreach_drafts").fetchone()[0]
+    drafts_in_gmail = conn.execute("SELECT count(*) FROM referral_outreach_drafts WHERE status = 'CREATED_IN_GMAIL'").fetchone()[0]
+    opt_out_count = conn.execute("SELECT count(*) FROM candidates WHERE opt_out_status = 1").fetchone()[0]
+
+    return {
+        "total_imported_files": files_count,
+        "total_candidates": total_candidates,
+        "cv_candidates": cv_candidates,
+        "active_opportunities": opportunities_count,
+        "total_matches": matches_count,
+        "high_confidence_matches": high_matches,
+        "total_drafts": drafts_count,
+        "drafts_created_in_gmail": drafts_in_gmail,
+        "suppressed_candidates": opt_out_count,
+    }
+
+
 

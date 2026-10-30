@@ -48,7 +48,30 @@ from db import (
     list_strategy_versions,
     save_strategy_version,
     get_search_tasks,
+    list_candidate_files,
+    get_cv_import_job,
+    list_cv_import_jobs,
+    get_cv_import_job_files,
+    update_candidate_opt_out,
+    update_candidate_contact_permission,
+    list_referral_opportunities,
+    get_referral_opportunity,
+    create_referral_opportunity,
+    update_referral_opportunity,
+    create_referral_link,
+    list_referral_links,
+    list_candidate_matches,
+    update_match_reviewer_decision,
+    list_outreach_drafts,
+    get_outreach_draft,
+    update_draft_status,
+    get_cv_outreach_overview_metrics,
 )
+from cv_parser import cv_parser, ParsedCV
+from cv_deduplicator import cv_deduplicator
+from cv_import_manager import cv_import_manager
+from opportunity_matcher import opportunity_matcher
+from gmail_outreach import gmail_outreach
 from groq_extractor import (
     DEFAULT_GROQ_MODEL,
     extract_requirements_with_groq,
@@ -102,6 +125,9 @@ def set_db_path(new_path: Path | str):
     global DB_PATH, conn
     DB_PATH = Path(new_path)
     conn = init_db(DB_PATH)
+    return conn
+
+def get_db():
     return conn
 
 app = FastAPI(
@@ -1630,3 +1656,492 @@ async def restore_database_backup(file: UploadFile = File(...)) -> dict[str, Any
         "message": msg,
         "safety_snapshot": safety.name if safety else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# CV-to-Referral Outreach API Endpoints
+# ---------------------------------------------------------------------------
+
+class FolderImportRequest(BaseModel):
+    folder_path: str
+    batch_size: int = 15
+    run_async: bool = False
+
+
+class CandidateOptOutRequest(BaseModel):
+    opt_out: bool = True
+    reason: str = ""
+
+
+class CandidateContactPermissionRequest(BaseModel):
+    permission_basis: str
+
+
+@app.post("/api/cv-import/folder")
+def import_cvs_from_folder(req: FolderImportRequest) -> dict[str, Any]:
+    """Imports CV files from a local Windows folder in memory-bounded batches."""
+    target_dir = Path(req.folder_path).resolve()
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Folder not found or is not a directory: '{req.folder_path}'",
+        )
+
+    conn = get_db()
+    try:
+        job_id = cv_import_manager.start_folder_import(
+            conn=conn,
+            folder_path=target_dir,
+            batch_size=req.batch_size,
+            run_async=req.run_async,
+        )
+        job = get_cv_import_job(conn, job_id)
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": job["status"] if job else "QUEUED",
+            "total_files": job["total_files"] if job else 0,
+            "message": f"Discovered {job['total_files'] if job else 0} CV files in {target_dir.name}",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start folder import: {exc}")
+
+
+@app.post("/api/cv-import/zip")
+async def import_cvs_from_zip(
+    file: UploadFile = File(...),
+    batch_size: int = 15,
+    run_async: bool = False,
+) -> dict[str, Any]:
+    """Extracts a ZIP archive of CVs safely and processes them incrementally."""
+    if not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Only .zip files are supported.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded ZIP file is empty.")
+
+    conn = get_db()
+    try:
+        extract_dir = APP_DIR / "uploads" / "cv_zips"
+        job_id = cv_import_manager.start_zip_import(
+            conn=conn,
+            zip_bytes=content,
+            zip_filename=file.filename,
+            extract_to_dir=extract_dir,
+            batch_size=batch_size,
+            run_async=run_async,
+        )
+        job = get_cv_import_job(conn, job_id)
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": job["status"] if job else "QUEUED",
+            "total_files": job["total_files"] if job else 0,
+            "message": f"Successfully extracted and indexed {job['total_files'] if job else 0} CV files from {file.filename}",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to process ZIP archive: {exc}")
+
+
+@app.get("/api/cv-import/jobs")
+def list_import_jobs(limit: int = 50) -> list[dict[str, Any]]:
+    """Lists CV import jobs with progress statistics and status."""
+    conn = get_db()
+    return list_cv_import_jobs(conn, limit=limit)
+
+
+@app.get("/api/cv-import/jobs/{job_id}")
+def get_import_job_details(job_id: str) -> dict[str, Any]:
+    """Retrieves details of a specific CV import job."""
+    conn = get_db()
+    job = get_cv_import_job(conn, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Import job '{job_id}' not found.")
+    return job
+
+
+@app.get("/api/cv-import/jobs/{job_id}/files")
+def list_import_job_files(
+    job_id: str,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Returns paginated file items belonging to an import job."""
+    conn = get_db()
+    return get_cv_import_job_files(conn, job_id, limit=limit, offset=offset)
+
+
+@app.post("/api/cv-import/jobs/{job_id}/cancel")
+def cancel_import_job(job_id: str) -> dict[str, Any]:
+    """Cancels an in-progress or queued import job."""
+    conn = get_db()
+    ok = cv_import_manager.cancel_job(conn, job_id)
+    return {"success": ok, "job_id": job_id, "message": "Job cancelled." if ok else "Job not running."}
+
+
+@app.post("/api/cv-import/jobs/{job_id}/retry")
+def retry_failed_import_files(job_id: str, batch_size: int = 15) -> dict[str, Any]:
+    """Retries failed or OCR-required files in a CV import job."""
+    conn = get_db()
+    ok = cv_import_manager.retry_failed_files(conn, job_id, batch_size=batch_size)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Job not found or could not be retried.")
+    return {"success": True, "job_id": job_id, "message": "Failed files queued for retry."}
+
+
+@app.get("/api/referrals/candidates")
+def list_referral_candidates(
+    search: str = "",
+    opt_out_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Lists candidates with their associated CV files, permission basis, and suppression state."""
+    conn = get_db()
+    query = "SELECT * FROM candidates WHERE 1=1"
+    params: list[Any] = []
+    if opt_out_only:
+        query += " AND opt_out_status = 1"
+    if search:
+        query += " AND (LOWER(name) LIKE ? OR LOWER(email) LIKE ? OR LOWER(skills) LIKE ?)"
+        s = f"%{search.lower().strip()}%"
+        params.extend([s, s, s])
+    query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
+    rows = conn.execute(query, params).fetchall()
+    candidates = []
+    for r in rows:
+        cd = dict(r)
+        # Fetch attached CV files
+        files = list_candidate_files(conn, cd["id"])
+        cd["files"] = files
+        cd["file_count"] = len(files)
+        # Parse json fields safely
+        for jf in ["skills", "languages", "raw_sources", "work_experiences"]:
+            try:
+                if cd.get(jf) and isinstance(cd[jf], str):
+                    cd[jf] = json.loads(cd[jf])
+            except Exception:
+                cd[jf] = []
+        candidates.append(cd)
+    return candidates
+
+
+@app.post("/api/referrals/candidates/{candidate_id}/opt-out")
+def set_candidate_opt_out_status(
+    candidate_id: int,
+    req: CandidateOptOutRequest,
+) -> dict[str, Any]:
+    """Records or revokes an opt-out for a candidate, updating suppression status."""
+    conn = get_db()
+    cand = get_candidate(conn, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail=f"Candidate #{candidate_id} not found.")
+
+    update_candidate_opt_out(conn, candidate_id, req.opt_out, req.reason)
+    return {
+        "success": True,
+        "candidate_id": candidate_id,
+        "opt_out_status": 1 if req.opt_out else 0,
+        "suppression_reason": req.reason,
+        "message": "Candidate opted out and suppressed from future outreach." if req.opt_out else "Candidate opt-out removed.",
+    }
+
+
+@app.post("/api/referrals/candidates/{candidate_id}/permission")
+def set_candidate_permission_basis(
+    candidate_id: int,
+    req: CandidateContactPermissionRequest,
+) -> dict[str, Any]:
+    """Updates the documented contact permission basis for a candidate."""
+    conn = get_db()
+    cand = get_candidate(conn, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail=f"Candidate #{candidate_id} not found.")
+
+    update_candidate_contact_permission(conn, candidate_id, req.permission_basis)
+    return {
+        "success": True,
+        "candidate_id": candidate_id,
+        "permission_basis": req.permission_basis,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CV Outreach Overview, Opportunities, Matches & Gmail Endpoints
+# ---------------------------------------------------------------------------
+
+class CreateOpportunityRequest(BaseModel):
+    platform: str
+    title: str
+    description: str = ""
+    url: str = ""
+    requirements: list[str] = Field(default_factory=list)
+    location_restrictions: str = "Remote (Global)"
+    language_requirements: list[str] = Field(default_factory=lambda: ["English"])
+    experience_years_min: int = 0
+    verification_status: str = "UNVERIFIED"
+    verification_source: str = ""
+    verification_notes: str = ""
+
+
+class CreateReferralLinkRequest(BaseModel):
+    url: str
+    platform: str = ""
+    owner_label: str = "Default Recruiter"
+    eligibility_notes: str = ""
+
+
+class EvaluateMatchesRequest(BaseModel):
+    min_score: int = 40
+
+
+class MatchDecisionRequest(BaseModel):
+    decision: str  # "APPROVED", "REJECTED", "PENDING"
+    notes: str = ""
+
+
+class DraftPreviewRequest(BaseModel):
+    candidate_id: int
+    opportunity_id: int
+    referral_link_id: Optional[int] = None
+    recruiter_name: str = "Recruitment Partner"
+
+
+class CreateDraftRequest(BaseModel):
+    candidate_id: int
+    opportunity_id: int
+    referral_link_id: Optional[int] = None
+    subject: Optional[str] = None
+    body_text: Optional[str] = None
+    save_to_gmail: bool = True
+    mock_mode: bool = False
+
+
+class UpdateDraftStatusRequest(BaseModel):
+    status: str  # "PENDING_REVIEW", "REVIEWED", "CREATED_IN_GMAIL", "SENT_MANUALLY", "SKIPPED"
+
+
+@app.get("/api/referrals/overview")
+def get_cv_outreach_overview() -> dict[str, Any]:
+    """Retrieves real-time aggregated metrics for the CV Outreach dashboard."""
+    conn = get_db()
+    return get_cv_outreach_overview_metrics(conn)
+
+
+@app.get("/api/referrals/opportunities")
+def list_opportunities(is_active: bool = True) -> list[dict[str, Any]]:
+    """Lists referral opportunities (Turing, Mercor, micro1, etc.) with attached referral links."""
+    conn = get_db()
+    return list_referral_opportunities(conn, is_active=is_active)
+
+
+@app.post("/api/referrals/opportunities")
+def create_opportunity(req: CreateOpportunityRequest) -> dict[str, Any]:
+    """Creates a new referral opportunity."""
+    conn = get_db()
+    opp_id = create_referral_opportunity(
+        conn=conn,
+        platform=req.platform,
+        title=req.title,
+        description=req.description,
+        url=req.url,
+        requirements=req.requirements,
+        location_restrictions=req.location_restrictions,
+        language_requirements=req.language_requirements,
+        experience_years_min=req.experience_years_min,
+        verification_status=req.verification_status,
+        verification_source=req.verification_source,
+        verification_notes=req.verification_notes,
+    )
+    return {"success": True, "opportunity_id": opp_id, "message": f"Created opportunity #{opp_id}"}
+
+
+@app.get("/api/referrals/opportunities/{opportunity_id}")
+def get_opportunity(opportunity_id: int) -> dict[str, Any]:
+    """Retrieves details of a single referral opportunity."""
+    conn = get_db()
+    opp = get_referral_opportunity(conn, opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail=f"Opportunity #{opportunity_id} not found.")
+    return opp
+
+
+@app.post("/api/referrals/opportunities/{opportunity_id}/verify")
+def set_opportunity_verification(
+    opportunity_id: int,
+    status: str = "VERIFIED",
+    source: str = "Recruiter manual check",
+) -> dict[str, Any]:
+    """Updates verification status and source for an opportunity."""
+    conn = get_db()
+    opp = get_referral_opportunity(conn, opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail=f"Opportunity #{opportunity_id} not found.")
+
+    update_referral_opportunity(
+        conn,
+        opportunity_id,
+        verification_status=status,
+        verification_source=source,
+        last_verified_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    return {"success": True, "opportunity_id": opportunity_id, "status": status}
+
+
+@app.post("/api/referrals/opportunities/{opportunity_id}/links")
+def add_referral_link(
+    opportunity_id: int,
+    req: CreateReferralLinkRequest,
+) -> dict[str, Any]:
+    """Adds a referral URL to a specific opportunity."""
+    conn = get_db()
+    opp = get_referral_opportunity(conn, opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail=f"Opportunity #{opportunity_id} not found.")
+
+    link_id = create_referral_link(
+        conn=conn,
+        opportunity_id=opportunity_id,
+        platform=req.platform or opp["platform"],
+        url=req.url,
+        owner_label=req.owner_label,
+        eligibility_notes=req.eligibility_notes,
+    )
+    return {"success": True, "link_id": link_id, "message": "Referral link added."}
+
+
+@app.post("/api/referrals/matches/evaluate")
+def evaluate_all_matches(req: EvaluateMatchesRequest) -> dict[str, Any]:
+    """Runs deterministic matching of all eligible candidates against active opportunities."""
+    conn = get_db()
+    count = opportunity_matcher.match_all_candidates_and_persist(conn, min_score=req.min_score)
+    return {"success": True, "matches_evaluated": count, "message": f"Evaluated and persisted {count} matches."}
+
+
+@app.get("/api/referrals/matches")
+def list_matches(
+    opportunity_id: Optional[int] = None,
+    candidate_id: Optional[int] = None,
+    min_score: Optional[int] = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Lists candidate-to-opportunity matches with transparent scores, breakdowns, and evidence."""
+    conn = get_db()
+    return list_candidate_matches(
+        conn=conn,
+        opportunity_id=opportunity_id,
+        candidate_id=candidate_id,
+        min_score=min_score,
+        limit=limit,
+    )
+
+
+@app.post("/api/referrals/matches/{match_id}/decision")
+def update_match_decision(
+    match_id: int,
+    req: MatchDecisionRequest,
+) -> dict[str, Any]:
+    """Records human reviewer approval or rejection of a match."""
+    conn = get_db()
+    update_match_reviewer_decision(conn, match_id, req.decision, req.notes)
+    return {"success": True, "match_id": match_id, "decision": req.decision}
+
+
+@app.get("/api/gmail/auth-status")
+def get_gmail_auth_status() -> dict[str, Any]:
+    """Checks official Google Gmail OAuth connection status for draft creation."""
+    return gmail_outreach.get_auth_status()
+
+
+@app.post("/api/referrals/drafts/preview")
+def preview_outreach_draft(req: DraftPreviewRequest) -> dict[str, Any]:
+    """Generates an honest, personalized draft preview without saving to Gmail."""
+    conn = get_db()
+    cand = get_candidate(conn, req.candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail=f"Candidate #{req.candidate_id} not found.")
+
+    opp = get_referral_opportunity(conn, req.opportunity_id)
+    if not opp:
+        raise HTTPException(status_code=404, detail=f"Opportunity #{req.opportunity_id} not found.")
+
+    ref_url = opp.get("url") or ""
+    if req.referral_link_id:
+        links = list_referral_links(conn, opp_id=req.opportunity_id)
+        lnk = next((l for l in links if l["id"] == req.referral_link_id), None)
+        if lnk:
+            ref_url = lnk["url"]
+    elif opp.get("links"):
+        ref_url = opp["links"][0]["url"]
+
+    content = gmail_outreach.generate_draft_content(
+        candidate=cand,
+        opportunity=opp,
+        referral_link_url=ref_url,
+        recruiter_name=req.recruiter_name,
+    )
+
+    return {
+        "candidate_id": req.candidate_id,
+        "candidate_name": cand.get("name"),
+        "opportunity_id": req.opportunity_id,
+        "opportunity_title": opp.get("title"),
+        "recipient_email": cand.get("email"),
+        "subject": content["subject"],
+        "body_text": content["body_text"],
+        "referral_url": content["referral_url"],
+    }
+
+
+@app.post("/api/referrals/drafts/create")
+def create_outreach_draft(req: CreateDraftRequest) -> dict[str, Any]:
+    """
+    Creates an editable outreach draft in Gmail (or saves draft record).
+    CRITICAL: Never sends the email. User reviews and sends inside Gmail.
+    """
+    conn = get_db()
+    try:
+        res = gmail_outreach.prepare_and_save_draft_record(
+            conn=conn,
+            candidate_id=req.candidate_id,
+            opportunity_id=req.opportunity_id,
+            referral_link_id=req.referral_link_id,
+            custom_subject=req.subject,
+            custom_body=req.body_text,
+            save_to_gmail=req.save_to_gmail,
+            mock_mode=req.mock_mode,
+        )
+        return {
+            "success": True,
+            "draft": res,
+            "message": "Draft created in Gmail." if res.get("is_saved_in_gmail") else "Draft saved for review.",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create draft: {exc}")
+
+
+@app.get("/api/referrals/drafts")
+def list_drafts(status: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
+    """Lists saved outreach drafts with status, opportunity titles, and Gmail draft IDs."""
+    conn = get_db()
+    return list_outreach_drafts(conn, status=status, limit=limit)
+
+
+@app.post("/api/referrals/drafts/{draft_id}/status")
+def set_draft_status(draft_id: int, req: UpdateDraftStatusRequest) -> dict[str, Any]:
+    """Updates status of a draft (e.g. REVIEWED, SENT_MANUALLY, SKIPPED)."""
+    conn = get_db()
+    draft = get_outreach_draft(conn, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail=f"Draft #{draft_id} not found.")
+
+    update_draft_status(conn, draft_id, req.status)
+    return {"success": True, "draft_id": draft_id, "status": req.status}
+
+
+
