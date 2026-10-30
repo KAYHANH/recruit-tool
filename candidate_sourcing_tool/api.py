@@ -1630,3 +1630,8 @@ async def restore_database_backup(file: UploadFile = File(...)) -> dict[str, Any
         "message": msg,
         "safety_snapshot": safety.name if safety else None,
     }
+
+
+# Bulk CV referral outreach (local parsing; Gmail drafts only).
+from bulk_outreach import router as bulk_outreach_router
+app.include_router(bulk_outreach_router)
