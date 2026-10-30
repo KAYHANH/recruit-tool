@@ -270,6 +270,88 @@ class TestCVExtractionAndDeduplication(unittest.TestCase):
         self.assertEqual(cand_after["opt_out_status"], 1)
         self.assertEqual(cand_after["suppression_reason"], "Requested removal via email")
 
+    def test_rtf_extraction(self):
+        """Tests local RTF resume text extraction with RTF formatting code stripping."""
+        rtf_content = (
+            "{\\rtf1\\ansi\\deff0\n"
+            "{\\fonttbl{\\f0 Helvetica;}}\n"
+            "\\viewkind4\\uc1\\pard\\f0\\fs24\n"
+            "Grace Kelly\\par\n"
+            "grace.kelly@hollywoodtech.com | +1 555-492-9901\\par\n"
+            "Los Angeles, California\\par\n"
+            "Summary: 7 years of experience in full-stack engineering with Python, React, and AWS.\\par\n"
+            "Skills: Python, React, PostgreSQL, Docker\\par\n"
+            "Languages: English, French\\par\n"
+            "}"
+        ).encode("ascii")
+
+        parsed = cv_parser.parse_bytes(rtf_content, "grace_resume.rtf")
+        self.assertEqual(parsed.parsing_status, "SUCCESS")
+        self.assertEqual(parsed.name, "Grace Kelly")
+        self.assertEqual(parsed.normalized_email, "grace.kelly@hollywoodtech.com")
+        self.assertIn("python", parsed.skills)
+        self.assertIn("react", parsed.skills)
+        self.assertEqual(parsed.years_of_experience, 7)
+
+    def test_zip_slip_rejection(self):
+        """Tests that ZIP archives containing path traversal entries (.. or /evil) are rejected."""
+        import zipfile
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            # Dangerous zip-slip member
+            zf.writestr("../../evil_exploit.txt", "Malicious file outside extraction dir")
+        zip_buf.seek(0)
+
+        with self.assertRaises(ValueError) as ctx:
+            cv_import_manager.start_zip_import(
+                conn=self.conn,
+                zip_source=zip_buf.getvalue(),
+                zip_filename="dangerous.zip",
+                extract_to_dir=self.dir_path / "zip_test",
+                batch_size=5,
+                run_async=False,
+            )
+        self.assertIn("no supported cv files", str(ctx.exception).lower())
+
+    def test_zip_symlink_rejection(self):
+        """Tests that ZIP archives containing symlinks are safely skipped without resolving links."""
+        import zipfile
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            # Create symlink member
+            zi = zipfile.ZipInfo("symlink_exploit.pdf")
+            zi.create_system = 3  # Unix
+            zi.external_attr = 0o120777 << 16  # Symlink bit
+            zf.writestr(zi, "/etc/passwd")
+        zip_buf.seek(0)
+
+        with self.assertRaises(ValueError) as ctx:
+            cv_import_manager.start_zip_import(
+                conn=self.conn,
+                zip_source=zip_buf.getvalue(),
+                zip_filename="symlink.zip",
+                extract_to_dir=self.dir_path / "zip_symlink_test",
+                batch_size=5,
+                run_async=False,
+            )
+        self.assertIn("no supported cv files", str(ctx.exception).lower())
+
+    def test_worker_recovery_after_interruption(self):
+        """Tests that recover_interrupted_jobs resets stuck PROCESSING jobs to PAUSED upon server restart."""
+        # Create mock stuck PROCESSING job
+        self.conn.execute(
+            """INSERT INTO cv_import_jobs(job_id, source_type, source_path, status, total_files, processed_files, created_at)
+            VALUES('job-stuck-123', 'folder', '/mock/folder', 'PROCESSING', 10, 3, '2026-10-30')"""
+        )
+        self.conn.commit()
+
+        recovered_count = cv_import_manager.recover_interrupted_jobs(self.conn)
+        self.assertEqual(recovered_count, 1)
+
+        job = get_cv_import_job(self.conn, 'job-stuck-123')
+        self.assertEqual(job["status"], "PAUSED")
+        self.assertIn("interrupted", job["error_message"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

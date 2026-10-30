@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import shutil
 import sqlite3
 import threading
 import uuid
@@ -27,7 +29,7 @@ from db import (
 
 logger = logging.getLogger("cv_import_manager")
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".rtf"}
 
 # ZIP Bomb & Payload Safeguards
 MAX_ZIP_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500 MB max compressed archive
@@ -42,6 +44,42 @@ class CVImportManager:
     def __init__(self):
         self._cancel_flags: dict[str, bool] = {}
         self._pause_flags: dict[str, bool] = {}
+        self._active_workers: dict[str, threading.Thread] = {}
+        self._worker_lock = threading.Lock()
+
+    def _start_worker_thread(self, db_path: str, job_id: str, batch_size: int) -> None:
+        """Starts a background worker thread for a job if not already active."""
+        with self._worker_lock:
+            existing = self._active_workers.get(job_id)
+            if existing and existing.is_alive():
+                logger.info("Worker thread for job %s already running.", job_id)
+                return
+            t = threading.Thread(
+                target=self._run_job_worker,
+                args=(db_path, job_id, batch_size),
+                daemon=True,
+                name=f"CVImportWorker-{job_id[:8]}",
+            )
+            self._active_workers[job_id] = t
+            t.start()
+
+    def recover_interrupted_jobs(self, conn: sqlite3.Connection) -> int:
+        """Recovers jobs that were left in PROCESSING state when server stopped/crashed."""
+        rows = conn.execute(
+            """SELECT job_id FROM cv_import_jobs WHERE status = 'PROCESSING'"""
+        ).fetchall()
+        count = 0
+        for r in rows:
+            update_cv_import_job(
+                conn,
+                r["job_id"],
+                status="PAUSED",
+                error_message="Interrupted by server restart. Click Resume or Retry to continue.",
+            )
+            count += 1
+        if count > 0:
+            logger.info("Recovered %d interrupted import job(s) into PAUSED state.", count)
+        return count
 
     def cancel_job(self, conn: sqlite3.Connection, job_id: str) -> bool:
         """Signals an in-progress import job to cancel gracefully."""
@@ -85,12 +123,7 @@ class CVImportManager:
 
         if run_async:
             db_path = conn.execute("PRAGMA database_list").fetchone()[2]
-            worker_thread = threading.Thread(
-                target=self._run_job_worker,
-                args=(db_path, job_id, batch_size),
-                daemon=True,
-            )
-            worker_thread.start()
+            self._start_worker_thread(db_path, job_id, batch_size)
         else:
             self._process_job_loop(conn, job_id, batch_size=batch_size)
         return True
@@ -142,12 +175,7 @@ class CVImportManager:
 
         if run_async:
             db_path = conn.execute("PRAGMA database_list").fetchall()[0][2]
-            t = threading.Thread(
-                target=self._run_job_worker,
-                args=(db_path, job_id, batch_size),
-                daemon=True,
-            )
-            t.start()
+            self._start_worker_thread(db_path, job_id, batch_size)
         else:
             self._process_job_loop(conn, job_id, batch_size=batch_size)
 
@@ -156,69 +184,100 @@ class CVImportManager:
     def start_zip_import(
         self,
         conn: sqlite3.Connection,
-        zip_bytes: bytes,
+        zip_source: bytes | Path | str,
         zip_filename: str,
         extract_to_dir: Path | str,
         batch_size: int = 15,
         run_async: bool = True,
     ) -> str:
         """Extracts a ZIP archive into a managed local folder with ZIP-bomb protection and starts import."""
-        if len(zip_bytes) > MAX_ZIP_ARCHIVE_SIZE:
-            raise ValueError(
-                f"Uploaded archive ({len(zip_bytes) // (1024 * 1024)} MB) exceeds maximum allowed ZIP size ({MAX_ZIP_ARCHIVE_SIZE // (1024 * 1024)} MB)."
-            )
-
-        dest = Path(extract_to_dir).resolve() / f"zip_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        dest = Path(extract_to_dir).resolve() / f"zip_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         dest.mkdir(parents=True, exist_ok=True)
 
-        total_expanded_bytes = 0
-        extracted_file_count = 0
+        try:
+            total_expanded_bytes = 0
+            extracted_file_count = 0
 
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            members = zf.infolist()
-            if len(members) > MAX_FILE_COUNT:
+            if isinstance(zip_source, (Path, str)):
+                source_path = Path(zip_source)
+                if not source_path.exists():
+                    raise ValueError(f"ZIP archive not found: {source_path}")
+                archive_size = source_path.stat().st_size
+                zf_ctx = zipfile.ZipFile(source_path)
+            else:
+                archive_size = len(zip_source)
+                zf_ctx = zipfile.ZipFile(io.BytesIO(zip_source))
+
+            if archive_size > MAX_ZIP_ARCHIVE_SIZE:
                 raise ValueError(
-                    f"Archive contains {len(members)} files, which exceeds maximum safety limit of {MAX_FILE_COUNT} files."
+                    f"Uploaded archive ({archive_size // (1024 * 1024)} MB) exceeds maximum allowed ZIP size ({MAX_ZIP_ARCHIVE_SIZE // (1024 * 1024)} MB)."
                 )
 
-            for member in members:
-                # Prevent zip-slip directory traversal
-                member_path = Path(member.filename)
-                if member_path.is_absolute() or ".." in member_path.parts:
-                    continue
-                if member.filename.endswith("/"):
-                    continue
-
-                if member.file_size > MAX_PER_FILE_SIZE:
+            with zf_ctx as zf:
+                members = zf.infolist()
+                if len(members) > MAX_FILE_COUNT:
                     raise ValueError(
-                        f"Archive file '{member.filename}' ({member.file_size // (1024 * 1024)} MB) exceeds single file limit of {MAX_PER_FILE_SIZE // (1024 * 1024)} MB."
+                        f"Archive contains {len(members)} files, which exceeds maximum safety limit of {MAX_FILE_COUNT} files."
                     )
 
-                total_expanded_bytes += member.file_size
-                if total_expanded_bytes > MAX_TOTAL_EXPANDED_SIZE:
-                    raise ValueError(
-                        f"Total uncompressed ZIP size exceeds safety limit of {MAX_TOTAL_EXPANDED_SIZE // (1024 * 1024)} MB (Potential ZIP bomb detected)."
-                    )
+                for member in members:
+                    # Ignore directories
+                    if member.is_dir() or member.filename.endswith("/"):
+                        continue
 
-                ext = member_path.suffix.lower()
-                if ext in SUPPORTED_EXTENSIONS:
-                    target = dest / member_path.name
-                    with zf.open(member) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                    extracted_file_count += 1
+                    # Reject symlinks (0o120000 in upper 16 bits of external_attr)
+                    if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                        logger.warning("Rejecting symlink entry in zip: %s", member.filename)
+                        continue
 
-        if extracted_file_count == 0:
-            raise ValueError(f"No supported CV files ({', '.join(SUPPORTED_EXTENSIONS)}) found in uploaded ZIP archive.")
+                    # Prevent zip-slip directory traversal
+                    member_path = Path(member.filename)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        logger.warning("Rejecting suspicious path in zip: %s", member.filename)
+                        continue
 
-        return self.start_folder_import(conn, dest, batch_size=batch_size, run_async=run_async)
+                    if member.file_size > MAX_PER_FILE_SIZE:
+                        raise ValueError(
+                            f"Archive file '{member.filename}' ({member.file_size // (1024 * 1024)} MB) exceeds single file limit of {MAX_PER_FILE_SIZE // (1024 * 1024)} MB."
+                        )
+
+                    total_expanded_bytes += member.file_size
+                    if total_expanded_bytes > MAX_TOTAL_EXPANDED_SIZE:
+                        raise ValueError(
+                            f"Total uncompressed ZIP size exceeds safety limit of {MAX_TOTAL_EXPANDED_SIZE // (1024 * 1024)} MB (Potential ZIP bomb detected)."
+                        )
+
+                    ext = member_path.suffix.lower()
+                    if ext in SUPPORTED_EXTENSIONS:
+                        target = (dest / member_path).resolve()
+                        if not str(target).startswith(str(dest)):
+                            logger.warning("Zip slip attempt detected and blocked: %s", member.filename)
+                            continue
+
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        extracted_file_count += 1
+
+            if extracted_file_count == 0:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise ValueError(f"No supported CV files ({', '.join(sorted(SUPPORTED_EXTENSIONS))}) found in uploaded ZIP archive.")
+
+            return self.start_folder_import(conn, dest, batch_size=batch_size, run_async=run_async)
+
+        except Exception:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
 
     def retry_failed_files(
         self,
         conn: sqlite3.Connection,
         job_id: str,
         batch_size: int = 15,
+        run_async: bool = True,
     ) -> bool:
-        """Resets failed files in a job to QUEUED and reprocesses them."""
+        """Resets failed files in a job to QUEUED and reprocesses them.
+        Note: Excludes OCR_REQUIRED files to prevent infinite loops without an active OCR engine."""
         job = get_cv_import_job(conn, job_id)
         if not job:
             return False
@@ -226,13 +285,17 @@ class CVImportManager:
         conn.execute(
             """UPDATE cv_import_job_files
             SET status = 'QUEUED', error_message = ''
-            WHERE job_id = ? AND status IN ('FAILED', 'OCR_REQUIRED')""",
+            WHERE job_id = ? AND status = 'FAILED'""",
             (job_id,),
         )
         conn.commit()
 
         update_cv_import_job(conn, job_id, status="PROCESSING", error_message="")
-        self._process_job_loop(conn, job_id, batch_size=batch_size)
+        if run_async:
+            db_path = conn.execute("PRAGMA database_list").fetchall()[0][2]
+            self._start_worker_thread(db_path, job_id, batch_size)
+        else:
+            self._process_job_loop(conn, job_id, batch_size=batch_size)
         return True
 
     def _run_job_worker(self, db_path: str, job_id: str, batch_size: int):

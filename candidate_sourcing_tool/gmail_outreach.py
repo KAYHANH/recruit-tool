@@ -17,6 +17,8 @@ import hashlib
 import json
 import logging
 import os
+import secrets
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +56,30 @@ class GmailOutreachManager:
 
     def __init__(self):
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        self._oauth_states: dict[str, float] = {}
+        self._draft_locks: dict[str, threading.Lock] = {}
+        self._global_lock = threading.Lock()
+
+    def generate_oauth_state(self) -> str:
+        """Generates a secure state token and records it with a 10-minute expiry."""
+        state = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._global_lock:
+            # Clean expired states
+            self._oauth_states = {k: v for k, v in self._oauth_states.items() if (now - v) < 600}
+            self._oauth_states[state] = now
+        return state
+
+    def validate_oauth_state(self, state: str) -> bool:
+        """Validates and consumes an OAuth state token."""
+        if not state:
+            return False
+        now = time.time()
+        with self._global_lock:
+            ts = self._oauth_states.pop(state, None)
+            if ts is not None and (now - ts) < 600:
+                return True
+        return False
 
     def get_oauth_credentials(self) -> tuple[str, str]:
         """Resolves client ID and client secret from environment or credentials.json."""
@@ -72,12 +98,17 @@ class GmailOutreachManager:
                 logger.warning("Failed to parse credentials.json: %s", exc)
         return "", ""
 
-    def get_authorization_url(self, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> str:
+    def get_authorization_url(
+        self,
+        redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback",
+        state: str | None = None,
+    ) -> tuple[str, str]:
         """Constructs Google OAuth 2.0 URL strictly requesting compose (draft-only) scope."""
         client_id, _ = self.get_oauth_credentials()
         if not client_id:
             raise RuntimeError("Google Client ID not configured. Please supply GOOGLE_CLIENT_ID or credentials.json.")
 
+        state_token = state or self.generate_oauth_state()
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -85,8 +116,10 @@ class GmailOutreachManager:
             "scope": GMAIL_COMPOSE_SCOPE,
             "access_type": "offline",
             "prompt": "consent",
+            "state": state_token,
         }
-        return f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+        url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+        return url, state_token
 
     def exchange_code_for_tokens(self, code: str, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> dict[str, Any]:
         """Exchanges an authorization code for access and refresh tokens."""
@@ -449,103 +482,170 @@ class GmailOutreachManager:
             raise ValueError(f"Candidate #{candidate_id} not found.")
         cand = dict(cand_raw)
 
-        # Block if candidate opted out or suppressed
-        if cand.get("opt_out_status", 0) == 1:
-            raise ValueError(f"Cannot create draft: Candidate #{candidate_id} ({cand.get('name')}) has opted out of outreach.")
-
-        # Require explicit contact permission review
-        permission_basis = (cand.get("contact_permission_basis") or "").strip().lower()
-        if permission_basis in ("", "unverified", "pending_review", "unverified_ambiguous"):
-            raise ValueError(
-                f"Cannot create draft: Contact permission for Candidate #{candidate_id} ({cand.get('name')}) is '{permission_basis or 'unspecified'}'. "
-                f"Recruiter review and contact permission approval is required before outreach."
-            )
-
-        # Require verified recipient email
-        email_addr = (cand.get("email") or "").strip()
-        if not email_addr or "@" not in email_addr or "." not in email_addr.split("@")[-1]:
-            raise ValueError(f"Cannot create draft: Candidate #{candidate_id} has no verified email address ('{email_addr}').")
-
         opp = get_referral_opportunity(conn, opportunity_id)
         if not opp:
             raise ValueError(f"Opportunity #{opportunity_id} not found.")
 
-        # Determine referral link URL
-        ref_url = opp.get("url") or ""
-        if referral_link_id:
-            links = list_referral_links(conn, opp_id=opportunity_id)
-            match_lnk = next((l for l in links if l["id"] == referral_link_id), None)
-            if match_lnk:
-                ref_url = match_lnk["url"]
-        elif opp.get("links"):
-            ref_url = opp["links"][0]["url"]
-
-        content = self.generate_draft_content(cand, opp, referral_link_url=ref_url)
-        subject = custom_subject.strip() if custom_subject else content["subject"]
-        body_text = custom_body.strip() if custom_body else content["body_text"]
-
         idempotency_key = compute_draft_idempotency_key(candidate_id, opportunity_id)
 
-        # Check existing draft to prevent duplicate Gmail items
-        existing_draft = get_draft_by_idempotency_key(conn, idempotency_key)
-        existing_gmail_id = (existing_draft.get("gmail_draft_id") or "") if existing_draft else ""
+        # Acquire lock for this idempotency key to prevent race-condition duplicates
+        with self._global_lock:
+            if idempotency_key not in self._draft_locks:
+                self._draft_locks[idempotency_key] = threading.Lock()
+            lock = self._draft_locks[idempotency_key]
 
-        gmail_draft_id = existing_gmail_id
-        draft_status = "PENDING_REVIEW"
+        with lock:
+            # 1. Require candidate not opted out
+            if cand.get("opt_out_status", 0) == 1:
+                raise ValueError(f"Cannot create draft: Candidate #{candidate_id} ({cand.get('name')}) has opted out of outreach.")
 
-        if save_to_gmail:
-            if mock_mode or not self.is_authenticated():
-                # Clearly indicate simulated draft mode
-                if not gmail_draft_id or not gmail_draft_id.startswith("mock_draft_"):
+            # 2. Require approved outreach or direct consent
+            permission_basis = (cand.get("contact_permission_basis") or "").strip().upper()
+            if permission_basis not in ("APPROVED_OUTREACH", "DIRECT_CONSENT"):
+                raise ValueError(
+                    f"Cannot create draft: Contact permission for Candidate #{candidate_id} ({cand.get('name')}) is '{permission_basis or 'PENDING_REVIEW'}'. "
+                    f"Explicit recruiter approval ('APPROVED_OUTREACH' or 'DIRECT_CONSENT') in CV Library is required before outreach."
+                )
+
+            # 3. Require verified recipient email
+            email_addr = (cand.get("email") or "").strip()
+            email_status = (cand.get("email_verification_status") or "").strip().upper()
+            if not email_addr or "@" not in email_addr or "." not in email_addr.split("@")[-1] or email_status == "INVALID":
+                raise ValueError(f"Cannot create draft: Candidate #{candidate_id} has no valid verified email address ('{email_addr}').")
+
+            # 4. Require verified opportunity
+            opp_status = (opp.get("verification_status") or "").strip().upper()
+            if opp_status != "VERIFIED":
+                raise ValueError(
+                    f"Cannot create draft: Opportunity #{opportunity_id} ('{opp.get('title')}') is '{opp_status}'. "
+                    f"Only verified partner opportunities qualify for outreach drafts."
+                )
+
+            # Determine referral link URL
+            ref_url = opp.get("url") or ""
+            if referral_link_id:
+                links = list_referral_links(conn, opp_id=opportunity_id)
+                match_lnk = next((l for l in links if l["id"] == referral_link_id), None)
+                if match_lnk:
+                    ref_url = match_lnk["url"]
+            elif opp.get("links"):
+                ref_url = opp["links"][0]["url"]
+
+            content = self.generate_draft_content(cand, opp, referral_link_url=ref_url)
+            subject = custom_subject.strip() if custom_subject else content["subject"]
+            body_text = custom_body.strip() if custom_body else content["body_text"]
+
+            # Check existing draft to prevent duplicate Gmail items
+            existing_draft = get_draft_by_idempotency_key(conn, idempotency_key)
+            existing_gmail_id = (existing_draft.get("gmail_draft_id") or "") if existing_draft else ""
+
+            gmail_draft_id = existing_gmail_id
+            draft_status = "PENDING_REVIEW"
+
+            # Set durable CREATING state in database
+            create_or_update_draft(
+                conn=conn,
+                idempotency_key=idempotency_key,
+                candidate_id=candidate_id,
+                opportunity_id=opportunity_id,
+                referral_link_id=referral_link_id,
+                recipient_email=email_addr,
+                subject=subject,
+                body_text=body_text,
+                gmail_draft_id=existing_gmail_id,
+                status="CREATING",
+            )
+
+            if save_to_gmail:
+                if mock_mode:
                     token_mock = hashlib.sha256(f"{email_addr}:{subject}".encode("utf-8")).hexdigest()[:16]
                     gmail_draft_id = f"mock_draft_{token_mock}"
-                draft_status = "SIMULATED_DRAFT"
-            else:
-                # Live Gmail draft with duplicate prevention
-                if existing_gmail_id and not existing_gmail_id.startswith("mock_draft_"):
-                    # Update existing draft in Gmail
-                    gmail_draft_id = self.update_gmail_draft(
-                        draft_id=existing_gmail_id,
-                        recipient_email=email_addr,
-                        subject=subject,
-                        body_text=body_text,
-                    )
+                    draft_status = "SIMULATED_DRAFT"
                 else:
-                    # Create new draft in Gmail
-                    gmail_draft_id = self.create_gmail_draft(
-                        recipient_email=email_addr,
-                        subject=subject,
-                        body_text=body_text,
-                    )
-                draft_status = "CREATED_IN_GMAIL"
+                    if not self.is_authenticated():
+                        # Do not silently simulate! Fail cleanly with clear explanation
+                        create_or_update_draft(
+                            conn=conn,
+                            idempotency_key=idempotency_key,
+                            candidate_id=candidate_id,
+                            opportunity_id=opportunity_id,
+                            referral_link_id=referral_link_id,
+                            recipient_email=email_addr,
+                            subject=subject,
+                            body_text=body_text,
+                            gmail_draft_id=existing_gmail_id,
+                            status="FAILED",
+                        )
+                        raise RuntimeError(
+                            "Gmail OAuth is not connected. Complete Google OAuth connection first or select explicit Simulated Draft mode."
+                        )
 
-        draft_id = create_or_update_draft(
-            conn=conn,
-            idempotency_key=idempotency_key,
-            candidate_id=candidate_id,
-            opportunity_id=opportunity_id,
-            referral_link_id=referral_link_id,
-            recipient_email=email_addr,
-            subject=subject,
-            body_text=body_text,
-            gmail_draft_id=gmail_draft_id,
-            status=draft_status,
-        )
+                    try:
+                        if existing_gmail_id and not existing_gmail_id.startswith("mock_draft_"):
+                            gmail_draft_id = self.update_gmail_draft(
+                                draft_id=existing_gmail_id,
+                                recipient_email=email_addr,
+                                subject=subject,
+                                body_text=body_text,
+                            )
+                        else:
+                            gmail_draft_id = self.create_gmail_draft(
+                                recipient_email=email_addr,
+                                subject=subject,
+                                body_text=body_text,
+                            )
+                        draft_status = "CREATED_IN_GMAIL"
+                    except Exception as err:
+                        create_or_update_draft(
+                            conn=conn,
+                            idempotency_key=idempotency_key,
+                            candidate_id=candidate_id,
+                            opportunity_id=opportunity_id,
+                            referral_link_id=referral_link_id,
+                            recipient_email=email_addr,
+                            subject=subject,
+                            body_text=body_text,
+                            gmail_draft_id=existing_gmail_id,
+                            status="FAILED",
+                        )
+                        raise
 
-        return {
-            "draft_id": draft_id,
-            "idempotency_key": idempotency_key,
-            "candidate_id": candidate_id,
-            "candidate_name": cand.get("name"),
-            "opportunity_title": opp.get("title"),
-            "recipient_email": email_addr,
-            "subject": subject,
-            "body_text": body_text,
-            "gmail_draft_id": gmail_draft_id,
-            "status": draft_status,
-            "is_saved_in_gmail": bool(gmail_draft_id and not gmail_draft_id.startswith("mock_draft_")),
-            "is_simulated": bool(gmail_draft_id.startswith("mock_draft_")),
-        }
+            draft_id = create_or_update_draft(
+                conn=conn,
+                idempotency_key=idempotency_key,
+                candidate_id=candidate_id,
+                opportunity_id=opportunity_id,
+                referral_link_id=referral_link_id,
+                recipient_email=email_addr,
+                subject=subject,
+                body_text=body_text,
+                gmail_draft_id=gmail_draft_id,
+                status=draft_status,
+            )
+
+            return {
+                "draft_id": draft_id,
+                "idempotency_key": idempotency_key,
+                "candidate_id": candidate_id,
+                "candidate_name": cand.get("name"),
+                "opportunity_title": opp.get("title"),
+                "recipient_email": email_addr,
+                "subject": subject,
+                "body_text": body_text,
+                "gmail_draft_id": gmail_draft_id,
+                "status": draft_status,
+                "is_saved_in_gmail": bool(gmail_draft_id and not gmail_draft_id.startswith("mock_draft_")),
+                "is_simulated": bool(gmail_draft_id.startswith("mock_draft_")),
+            }
 
 
 gmail_outreach = GmailOutreachManager()
+
+
+def generate_oauth_state() -> str:
+    return gmail_outreach.generate_oauth_state()
+
+
+def validate_oauth_state(state: str) -> bool:
+    return gmail_outreach.validate_oauth_state(state)
+

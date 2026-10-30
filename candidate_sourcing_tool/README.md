@@ -49,17 +49,39 @@ Candidate Finder has evolved into a high-performance, modern recruitment and ref
 - **No Accidental Sends:** Every email draft is placed into your Gmail "Drafts" folder for human review. You review and click "Send" manually from the Gmail interface.
 - **Draft Idempotency:** Updating an outreach email updates the existing Gmail draft via `PUT /gmail/v1/users/me/drafts/{id}`, preventing duplicate draft clutter.
 
-### 3. Contact Permission Gating & Opt-Out Suppression
-- **Permission Basis:** Draft generation is blocked if a candidate's contact permission is unverified or ambiguous. Recruiters must approve permission basis (`approved_outreach`).
+### 3. Contact Permission Gating, Email Verification & Opt-Out Suppression
+- **Permission Lifecycle:** New CV imports default to `PENDING_REVIEW`. Draft generation is strictly blocked until a recruiter conducts a manual review and records `APPROVED_OUTREACH` or `DIRECT_CONSENT` along with reviewer identity, timestamp, and audit notes.
+- **Email Verification:** Status tracked as `VERIFIED`, `PENDING_VERIFICATION`, or `INVALID`. Bounced or invalid addresses are prevented from entering the outreach pipeline.
+- **Identity Ambiguity Protection:** Candidates with matching names but distinct or unverified emails are isolated with `AMBIGUOUS_REVIEW` and `UNVERIFIED` permission to prevent accidental profile merges.
 - **Suppression List:** Candidates who opt out (`opt_out_status = 1`) are immediately excluded from all matching recommendations and cannot receive outreach drafts.
 
-### 4. ZIP Safety & Asynchronous Batch Processing
-- **Archive Limits:** Hardened against ZIP bombs and denial of service:
-  - Max ZIP archive size: 500 MB
+### 4. Opportunity Verification Lifecycle
+- **Recruiter Audit Workflow:** Seeded and custom partner opportunities (Turing, Mercor, micro1) default to `UNVERIFIED`.
+- **Status Enum:** Strictly tracked through `UNVERIFIED`, `UNDER_REVIEW`, `VERIFIED`, and `EXPIRED_INACTIVE`.
+- **URL Separation:** Clearly distinguishes between official public career portal URLs and private referral track links.
+- **Audit Logging:** Every verification change logs the verification source, notes, and reviewer timestamp.
+
+### 5. Decoupled Scoring & Compliance Gating
+- **Pure Role Fit Score (0–100):** Evaluates candidate qualifications purely objectively:
+  - Skills & Core Competencies: 40 points
+  - Relevant Experience: 25 points
+  - Language Proficiency: 15 points (requires explicit evidence on CV)
+  - Location & Work Authorization: 10 points
+  - Secondary Tool Breadth: 10 points
+- **Independent Outreach Eligibility Gating:**
+  - `ELIGIBLE`: Fit score >= 65, candidate permission is `APPROVED_OUTREACH` or `DIRECT_CONSENT`, candidate not opted out, opportunity is `VERIFIED` and active, email is valid and verified.
+  - `PENDING_REVIEW`: Fit score >= 40, but compliance gates (permission, email verification, or opportunity status) need human review.
+  - `BLOCKED`: Fit score < 40, candidate opted out, or invalid/missing email.
+
+### 6. ZIP Safety, Streaming & Asynchronous Batch Processing
+- **Archive Limits & Defense:**
+  - Max ZIP archive size: 500 MB (streamed in 64KB disk chunks to prevent RAM exhaustion)
   - Max total expanded size: 1 GB
   - Max per-file size: 50 MB
   - Max file count: 2,500 files
-- **Background Async Execution:** Folder and ZIP imports process in background worker threads with real-time polling, pause, and resume capabilities.
+  - Zip-Slip path traversal protection and symlink entry rejection
+- **Crash Recovery:** Server startup automatically invokes `recover_interrupted_jobs`, moving interrupted `PROCESSING` jobs into `PAUSED` with resume capability.
+- **Background Async Execution:** Folder and ZIP imports process in dedicated worker threads with real-time polling, pause, and resume capabilities.
 
 ---
 

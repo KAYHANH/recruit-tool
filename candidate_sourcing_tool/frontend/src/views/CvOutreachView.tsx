@@ -22,7 +22,12 @@ import {
   Check,
   Pause,
   ShieldCheck,
+  ShieldAlert,
   LogOut,
+  ChevronLeft,
+  ChevronRight,
+  X,
+  Info,
 } from 'lucide-react';
 import { api } from '../api';
 import type {
@@ -66,6 +71,16 @@ export const CvOutreachView: React.FC = () => {
   const [candidateSearch, setCandidateSearch] = useState<string>('');
   const [optOutOnly, setOptOutOnly] = useState<boolean>(false);
   const [loadingCandidates, setLoadingCandidates] = useState<boolean>(false);
+  const [candidatePage, setCandidatePage] = useState<number>(1);
+  const CANDIDATES_PER_PAGE = 50;
+
+  // Permission Review Modal State
+  const [permissionCandidate, setPermissionCandidate] = useState<ReferralCandidate | null>(null);
+  const [permBasis, setPermBasis] = useState<string>('APPROVED_OUTREACH');
+  const [permReviewer, setPermReviewer] = useState<string>('Recruiter');
+  const [permNotes, setPermNotes] = useState<string>('');
+  const [permEmailStatus, setPermEmailStatus] = useState<string>('VERIFIED');
+  const [savingPermission, setSavingPermission] = useState<boolean>(false);
 
   // Opportunities State
   const [opportunities, setOpportunities] = useState<ReferralOpportunity[]>([]);
@@ -73,13 +88,29 @@ export const CvOutreachView: React.FC = () => {
   const [newOppPlatform, setNewOppPlatform] = useState<string>('Turing');
   const [newOppTitle, setNewOppTitle] = useState<string>('');
   const [newOppUrl, setNewOppUrl] = useState<string>('');
+  const [newOppReferralUrl, setNewOppReferralUrl] = useState<string>('');
   const [newOppReqs, setNewOppReqs] = useState<string>('python, react, fastapi');
+
+  // Verify Opportunity Modal State
+  const [verifyingOpp, setVerifyingOpp] = useState<ReferralOpportunity | null>(null);
+  const [oppStatus, setOppStatus] = useState<string>('VERIFIED');
+  const [oppSource, setOppSource] = useState<string>('Official Partner Portal');
+  const [oppNotes, setOppNotes] = useState<string>('');
+  const [savingOppVerification, setSavingOppVerification] = useState<boolean>(false);
 
   // Matches State
   const [matches, setMatches] = useState<CandidateOpportunityMatch[]>([]);
   const [matchFilterOpp, setMatchFilterOpp] = useState<number | undefined>(undefined);
   const [matchMinScore, setMatchMinScore] = useState<number>(40);
   const [isEvaluatingMatches, setIsEvaluatingMatches] = useState<boolean>(false);
+
+  // Blocked Draft Warning Modal
+  const [blockedWarning, setBlockedWarning] = useState<{
+    candidateName: string;
+    opportunityTitle: string;
+    reasons: string[];
+    suggestedTab?: OutreachTab;
+  } | null>(null);
 
   // Drafts State
   const [drafts, setDrafts] = useState<OutreachDraft[]>([]);
@@ -91,13 +122,13 @@ export const CvOutreachView: React.FC = () => {
   // File upload ref for ZIP
   const zipInputRef = useRef<HTMLInputElement>(null);
 
-  // Initial loader
+  // Loaders
   const loadOverview = async () => {
     try {
       const data = await api.getCVOutreachOverview();
       setOverview(data);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading overview:', err);
     }
   };
 
@@ -110,7 +141,7 @@ export const CvOutreachView: React.FC = () => {
         if (found) setSelectedJob(found);
       }
     } catch (err) {
-      console.error(err);
+      console.error('Error loading jobs:', err);
     }
   };
 
@@ -119,8 +150,9 @@ export const CvOutreachView: React.FC = () => {
     try {
       const data = await api.getReferralCandidates(candidateSearch, optOutOnly);
       setCandidates(data);
+      setCandidatePage(1);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading candidates:', err);
     } finally {
       setLoadingCandidates(false);
     }
@@ -131,7 +163,7 @@ export const CvOutreachView: React.FC = () => {
       const data = await api.getReferralOpportunities();
       setOpportunities(data);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading opportunities:', err);
     }
   };
 
@@ -140,7 +172,7 @@ export const CvOutreachView: React.FC = () => {
       const data = await api.getMatches(matchFilterOpp, matchMinScore);
       setMatches(data);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading matches:', err);
     }
   };
 
@@ -149,7 +181,7 @@ export const CvOutreachView: React.FC = () => {
       const auth = await api.getGmailAuthStatus();
       setGmailAuth(auth);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading Gmail auth:', err);
     }
   };
 
@@ -158,14 +190,14 @@ export const CvOutreachView: React.FC = () => {
       const [d] = await Promise.all([api.getDrafts(), loadGmailAuth()]);
       setDrafts(d);
     } catch (err) {
-      console.error(err);
+      console.error('Error loading drafts:', err);
     }
   };
 
+  // Tab switch effect (deduplicated loadOverview)
   useEffect(() => {
     loadOverview();
     if (activeTab === 'overview') {
-      loadOverview();
       loadJobs();
       loadOpportunities();
     } else if (activeTab === 'upload' || activeTab === 'history') {
@@ -283,8 +315,8 @@ export const CvOutreachView: React.FC = () => {
       if (selectedJob?.job_id === jobId) {
         setSelectedJob(await api.getImportJob(jobId));
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      alert(`Cancel error: ${err.message}`);
     }
   };
 
@@ -296,7 +328,7 @@ export const CvOutreachView: React.FC = () => {
         setSelectedJob(await api.getImportJob(jobId));
       }
     } catch (err: any) {
-      alert(err.message);
+      alert(`Pause error: ${err.message}`);
     }
   };
 
@@ -308,7 +340,7 @@ export const CvOutreachView: React.FC = () => {
         setSelectedJob(await api.getImportJob(jobId));
       }
     } catch (err: any) {
-      alert(err.message);
+      alert(`Resume error: ${err.message}`);
     }
   };
 
@@ -317,8 +349,8 @@ export const CvOutreachView: React.FC = () => {
       await api.retryImportJob(jobId, batchSize);
       await loadJobs();
       loadJobFiles(jobId);
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      alert(`Retry error: ${err.message}`);
     }
   };
 
@@ -337,8 +369,49 @@ export const CvOutreachView: React.FC = () => {
     }
   };
 
-  // Create Draft from Match
+  // Create Draft from Match with Strict Outreach Gating Check
   const handleGenerateDraftFromMatch = async (match: CandidateOpportunityMatch) => {
+    const isEligible = match.outreach_eligibility === 'ELIGIBLE';
+
+    if (!isEligible) {
+      const reasons: string[] = [];
+      if (match.candidate_opt_out === 1) {
+        reasons.push('Candidate has opted out of recruitment outreach.');
+      }
+      if (match.score < 40) {
+        reasons.push(`Candidate fit score is ${match.score}/100, which is below the minimum threshold of 40.`);
+      }
+      if (!match.candidate_email) {
+        reasons.push('Candidate has no email address extracted or verified.');
+      }
+      const permUpper = (match.candidate_permission_basis || 'PENDING_REVIEW').toUpperCase();
+      if (permUpper !== 'APPROVED_OUTREACH' && permUpper !== 'DIRECT_CONSENT') {
+        reasons.push(
+          `Candidate contact permission is "${match.candidate_permission_basis || 'PENDING_REVIEW'}". Outreach requires approved permission (APPROVED_OUTREACH or DIRECT_CONSENT).`
+        );
+      }
+      const emailStatusUpper = (match.candidate_email_verification_status || 'PENDING_VERIFICATION').toUpperCase();
+      if (emailStatusUpper !== 'VERIFIED') {
+        reasons.push(
+          `Email verification status is "${match.candidate_email_verification_status || 'PENDING_VERIFICATION'}". Email must be verified before drafting.`
+        );
+      }
+      const oppStatusUpper = (match.opportunity_verification_status || 'UNVERIFIED').toUpperCase();
+      if (oppStatusUpper !== 'VERIFIED') {
+        reasons.push(
+          `Opportunity is "${match.opportunity_verification_status || 'UNVERIFIED'}". Partner opportunities must be verified before outreach.`
+        );
+      }
+
+      setBlockedWarning({
+        candidateName: match.candidate_name,
+        opportunityTitle: `${match.opportunity_platform}: ${match.opportunity_title}`,
+        reasons: reasons.length > 0 ? reasons : ['One or more required compliance gates are not satisfied.'],
+        suggestedTab: oppStatusUpper !== 'VERIFIED' ? 'opportunities' : 'library',
+      });
+      return;
+    }
+
     try {
       const res = await api.createDraft({
         candidate_id: match.candidate_id,
@@ -346,24 +419,82 @@ export const CvOutreachView: React.FC = () => {
         save_to_gmail: true,
         mock_mode: false,
       });
-      alert(res.message || 'Draft prepared!');
+      alert(res.message || 'Draft prepared successfully in Gmail!');
       await loadDrafts();
       await loadOverview();
       setActiveTab('drafts');
     } catch (err: any) {
-      if (err.message?.includes('permission')) {
-        const approve = confirm(`${err.message}\n\nWould you like to approve contact permission for this candidate now?`);
-        if (approve) {
-          try {
-            await api.setCandidatePermissionBasis(match.candidate_id, 'approved_outreach');
-            await handleGenerateDraftFromMatch(match);
-          } catch (permErr: any) {
-            alert(permErr.message);
-          }
-        }
-      } else {
-        alert(`Draft creation error: ${err.message}`);
+      alert(`Draft creation error: ${err.message}`);
+    }
+  };
+
+  // Open Permission Modal
+  const openPermissionModal = (cand: ReferralCandidate) => {
+    setPermissionCandidate(cand);
+    setPermBasis(
+      cand.contact_permission_basis && cand.contact_permission_basis !== 'PENDING_REVIEW'
+        ? cand.contact_permission_basis
+        : 'APPROVED_OUTREACH'
+    );
+    setPermReviewer(cand.permission_reviewed_by || 'Recruiter');
+    setPermNotes(cand.permission_notes || '');
+    setPermEmailStatus(cand.email_verification_status || 'VERIFIED');
+  };
+
+  // Save Permission Modal
+  const handleSavePermission = async () => {
+    if (!permissionCandidate) return;
+    setSavingPermission(true);
+    try {
+      await api.setCandidatePermissionBasis(
+        permissionCandidate.id,
+        permBasis,
+        permReviewer.trim() || 'Recruiter',
+        permNotes.trim()
+      );
+      if (permEmailStatus) {
+        await api.setCandidateEmailVerification(
+          permissionCandidate.id,
+          permEmailStatus,
+          permNotes.trim()
+        );
       }
+      setPermissionCandidate(null);
+      await loadCandidates();
+      await loadOverview();
+    } catch (err: any) {
+      alert(`Failed to save permission: ${err.message}`);
+    } finally {
+      setSavingPermission(false);
+    }
+  };
+
+  // Open Opportunity Verification Modal
+  const openOppVerifyModal = (opp: ReferralOpportunity) => {
+    setVerifyingOpp(opp);
+    setOppStatus(opp.verification_status || 'VERIFIED');
+    setOppSource(opp.verification_source || 'Official Partner Portal / Agreement');
+    setOppNotes(opp.verification_notes || '');
+  };
+
+  // Save Opportunity Verification Modal
+  const handleSaveOppVerification = async () => {
+    if (!verifyingOpp) return;
+    setSavingOppVerification(true);
+    try {
+      await api.verifyOpportunity(
+        verifyingOpp.id,
+        oppStatus,
+        oppSource.trim() || 'Manual verification audit',
+        oppNotes.trim()
+      );
+      setVerifyingOpp(null);
+      await loadOpportunities();
+      await loadOverview();
+    } catch (err: any) {
+      alert(`Failed to verify opportunity: ${err.message}`);
+    } finally {
+      setSavingOppVerification(false);
     }
   };
 
@@ -378,37 +509,17 @@ export const CvOutreachView: React.FC = () => {
       await api.createReferralOpportunity({
         platform: newOppPlatform,
         title: newOppTitle.trim(),
-        url: newOppUrl.trim(),
+        official_url: newOppUrl.trim(),
+        referral_url: newOppReferralUrl.trim() || undefined,
         requirements: reqList,
         verification_status: 'UNVERIFIED',
       });
       setShowAddOppModal(false);
       setNewOppTitle('');
       setNewOppUrl('');
+      setNewOppReferralUrl('');
       await loadOpportunities();
       await loadOverview();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
-
-  const handleVerifyOpportunity = async (oppId: number) => {
-    const notes = prompt('Enter verification notes / program documentation source:');
-    if (notes === null) return;
-    try {
-      await api.verifyOpportunity(oppId, 'VERIFIED', 'Recruiter manual audit', notes);
-      await loadOpportunities();
-      await loadOverview();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
-
-  const handleApprovePermission = async (candidateId: number) => {
-    try {
-      await api.setCandidatePermissionBasis(candidateId, 'approved_outreach');
-      await loadCandidates();
-      alert('Contact permission approved for outreach.');
     } catch (err: any) {
       alert(err.message);
     }
@@ -479,6 +590,13 @@ export const CvOutreachView: React.FC = () => {
       alert(`Save error: ${err.message}`);
     }
   };
+
+  // Pagination for Candidates
+  const totalCandidatePages = Math.max(1, Math.ceil(candidates.length / CANDIDATES_PER_PAGE));
+  const displayedCandidates = candidates.slice(
+    (candidatePage - 1) * CANDIDATES_PER_PAGE,
+    candidatePage * CANDIDATES_PER_PAGE
+  );
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6">
@@ -578,10 +696,10 @@ export const CvOutreachView: React.FC = () => {
             <div className="space-y-1">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Sparkles size={18} className="text-indigo-400" />
-                Ready to match imported candidates with Turing, Mercor & micro1?
+                Deterministic Scoring & Compliance Gating
               </h3>
               <p className="text-xs text-slate-300">
-                Execute transparent deterministic scoring (40% skills, 25% exp, 15% lang, 10% loc, 10% other) across all non-opted-out candidates.
+                Transparent 100-pt fit scoring (40% skills, 25% exp, 15% lang, 10% loc, 10% other) decoupled from strict outreach compliance gates.
               </p>
             </div>
 
@@ -604,10 +722,10 @@ export const CvOutreachView: React.FC = () => {
             </div>
           </div>
 
-          {/* Verified Partner Programs */}
+          {/* Partner Programs Hub */}
           <div className="bg-slate-850 border border-slate-800 rounded-xl p-5 space-y-3">
             <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              Verified Partner Opportunity Hub ({opportunities.length})
+              Referral Opportunities Hub ({opportunities.length})
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {opportunities.map((opp) => (
@@ -616,7 +734,17 @@ export const CvOutreachView: React.FC = () => {
                     <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider">
                       {opp.platform}
                     </span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 uppercase">
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                        opp.verification_status === 'VERIFIED'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : opp.verification_status === 'UNDER_REVIEW'
+                          ? 'bg-blue-500/20 text-blue-300'
+                          : opp.verification_status === 'EXPIRED_INACTIVE'
+                          ? 'bg-rose-500/20 text-rose-300'
+                          : 'bg-amber-500/20 text-amber-300'
+                      }`}
+                    >
                       {opp.verification_status}
                     </span>
                   </div>
@@ -675,7 +803,7 @@ export const CvOutreachView: React.FC = () => {
                   </button>
                 </div>
                 <p className="text-xs text-slate-400">
-                  Recursively extracts text from PDF, DOCX, and TXT files using local offline parsers. No PII is sent to external services.
+                  Recursively extracts text from PDF, DOCX, RTF, and TXT files using local offline parsers. No PII is sent to external cloud APIs.
                 </p>
               </div>
 
@@ -700,7 +828,7 @@ export const CvOutreachView: React.FC = () => {
                   Select .ZIP Archive
                 </button>
                 <p className="text-xs text-slate-400">
-                  Safely unpacks resumes into a local folder and indexes records with SHA-256 deduplication.
+                  Safely unpacks resumes with Zip-Slip protection, symlink rejection, and SHA-256 deduplication.
                 </p>
               </div>
             </div>
@@ -763,46 +891,109 @@ export const CvOutreachView: React.FC = () => {
 
           <div className="bg-slate-850 border border-slate-700/80 rounded-xl overflow-hidden shadow-sm">
             <div className="bg-slate-900/80 px-6 py-3 border-b border-slate-800 flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                Indexed Candidates ({candidates.length})
-              </h3>
+              <div className="flex items-center gap-3">
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+                  Indexed Candidates ({candidates.length})
+                </h3>
+                <span className="text-xs text-slate-400">
+                  Showing {candidates.length === 0 ? 0 : (candidatePage - 1) * CANDIDATES_PER_PAGE + 1}–
+                  {Math.min(candidatePage * CANDIDATES_PER_PAGE, candidates.length)} of {candidates.length}
+                </span>
+              </div>
               {loadingCandidates && <RefreshCw size={14} className="animate-spin text-slate-400" />}
             </div>
 
-            <div className="divide-y divide-slate-800 max-h-[600px] overflow-y-auto">
-              {candidates.length === 0 ? (
+            <div className="divide-y divide-slate-800 max-h-[650px] overflow-y-auto">
+              {displayedCandidates.length === 0 ? (
                 <div className="p-12 text-center text-slate-400 text-sm">
                   No candidates found matching query.
                 </div>
               ) : (
-                candidates.map((cand) => {
+                displayedCandidates.map((cand) => {
                   const isOptedOut = cand.opt_out_status === 1;
+                  const permBasisUpper = (cand.contact_permission_basis || 'PENDING_REVIEW').toUpperCase();
+                  const emailStatusUpper = (cand.email_verification_status || 'PENDING_VERIFICATION').toUpperCase();
+                  const isAmbiguous = cand.status === 'AMBIGUOUS_REVIEW';
+
                   return (
                     <div
                       key={cand.id}
                       className="p-5 hover:bg-slate-800/30 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4"
                     >
-                      <div className="space-y-1.5">
-                        <div className="flex items-center gap-3">
+                      <div className="space-y-1.5 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-base font-bold text-white">{cand.name}</span>
+
+                          {/* Ambiguity Warning */}
+                          {isAmbiguous && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-950/80 border border-amber-600/60 text-amber-300 flex items-center gap-1">
+                              <AlertTriangle size={11} />
+                              Ambiguous Match Review
+                            </span>
+                          )}
+
+                          {/* Opt-Out Badge */}
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                              isOptedOut ? 'bg-rose-500/20 text-rose-300' : 'bg-emerald-500/20 text-emerald-300'
+                              isOptedOut
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                             }`}
                           >
-                            {isOptedOut ? 'Suppressed (Opted Out)' : 'Eligible for Outreach'}
+                            {isOptedOut ? 'Suppressed (Opted Out)' : 'Active'}
                           </span>
-                          <span className="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">
-                            Basis: {cand.contact_permission_basis || 'public_cv'}
+
+                          {/* Contact Permission Badge */}
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                              permBasisUpper === 'APPROVED_OUTREACH' || permBasisUpper === 'DIRECT_CONSENT'
+                                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/50'
+                                : permBasisUpper === 'PENDING_REVIEW'
+                                ? 'bg-amber-950/60 text-amber-300 border-amber-700/50'
+                                : permBasisUpper === 'OPTED_OUT'
+                                ? 'bg-rose-950/60 text-rose-300 border-rose-700/50'
+                                : 'bg-slate-800 text-slate-300 border-slate-700'
+                            }`}
+                          >
+                            Basis: {cand.contact_permission_basis || 'PENDING_REVIEW'}
+                          </span>
+
+                          {/* Email Verification Status Badge */}
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                              emailStatusUpper === 'VERIFIED'
+                                ? 'bg-teal-950/60 text-teal-300 border-teal-700/50'
+                                : emailStatusUpper === 'INVALID'
+                                ? 'bg-rose-950/60 text-rose-300 border-rose-700/50'
+                                : 'bg-slate-850 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            Email: {emailStatusUpper}
                           </span>
                         </div>
 
                         <div className="text-xs text-slate-300 flex flex-wrap items-center gap-x-4 gap-y-1">
-                          {cand.email && <span className="text-indigo-300 font-mono">{cand.email}</span>}
+                          {cand.email ? (
+                            <span className="text-indigo-300 font-mono">{cand.email}</span>
+                          ) : (
+                            <span className="text-rose-400/80 italic">No email extracted</span>
+                          )}
                           {cand.phone && <span>{cand.phone}</span>}
                           {cand.location && <span>{cand.location}</span>}
                           {cand.headline && <span className="text-slate-400 italic">{cand.headline}</span>}
                         </div>
+
+                        {/* Audit Details */}
+                        {(cand.permission_reviewed_by || cand.permission_notes) && (
+                          <div className="text-[11px] text-slate-400 flex items-center gap-1.5 pt-0.5">
+                            <Info size={12} className="text-indigo-400 shrink-0" />
+                            <span>
+                              Audited by <strong className="text-slate-300">{cand.permission_reviewed_by || 'Reviewer'}</strong>
+                              {cand.permission_reviewed_at && ` on ${new Date(cand.permission_reviewed_at).toLocaleDateString()}`}
+                              {cand.permission_notes && `: "${cand.permission_notes}"`}
+                            </span>
+                          </div>
+                        )}
 
                         <div className="flex flex-wrap items-center gap-1.5 pt-1">
                           {Array.isArray(cand.skills) &&
@@ -813,23 +1004,21 @@ export const CvOutreachView: React.FC = () => {
                             ))}
                           {cand.file_count && cand.file_count > 0 && (
                             <span className="text-[11px] text-indigo-400 bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-800/40">
-                              {cand.file_count} CV file{cand.file_count > 1 ? 's' : ''} linked
+                              {cand.file_count} CV file{cand.file_count > 1 ? 's' : ''}
                             </span>
                           )}
                         </div>
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
-                        {cand.contact_permission_basis !== 'approved_outreach' && (
-                          <button
-                            onClick={() => handleApprovePermission(cand.id)}
-                            className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-700 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-300 transition-all"
-                            title="Approve candidate contact permission for outreach drafts"
-                          >
-                            <ShieldCheck size={14} />
-                            Approve Permission
-                          </button>
-                        )}
+                        <button
+                          onClick={() => openPermissionModal(cand)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-700 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-300 transition-all"
+                          title="Review and update contact permission and email verification"
+                        >
+                          <ShieldCheck size={14} />
+                          Review Permission
+                        </button>
                         <button
                           onClick={() => handleToggleOptOut(cand)}
                           className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-all ${
@@ -847,7 +1036,129 @@ export const CvOutreachView: React.FC = () => {
                 })
               )}
             </div>
+
+            {/* Pagination Controls */}
+            {totalCandidatePages > 1 && (
+              <div className="bg-slate-900/80 px-6 py-3 border-t border-slate-800 flex items-center justify-between">
+                <span className="text-xs text-slate-400">
+                  Page {candidatePage} of {totalCandidatePages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCandidatePage((p) => Math.max(1, p - 1))}
+                    disabled={candidatePage === 1}
+                    className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-all"
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <button
+                    onClick={() => setCandidatePage((p) => Math.min(totalCandidatePages, p + 1))}
+                    disabled={candidatePage === totalCandidatePages}
+                    className="p-1.5 rounded border border-slate-700 bg-slate-800 text-slate-300 disabled:opacity-40 hover:bg-slate-700 transition-all"
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Permission Review Modal */}
+          {permissionCandidate && (
+            <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
+              <div className="bg-slate-850 border border-slate-700 rounded-xl p-6 max-w-lg w-full space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <ShieldCheck size={18} className="text-indigo-400" />
+                    Review Contact Permission: {permissionCandidate.name}
+                  </h3>
+                  <button
+                    onClick={() => setPermissionCandidate(null)}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="space-y-3.5 text-xs">
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Contact Permission Basis
+                    </label>
+                    <select
+                      value={permBasis}
+                      onChange={(e) => setPermBasis(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="APPROVED_OUTREACH">APPROVED_OUTREACH — Recruiter reviewed & approved</option>
+                      <option value="DIRECT_CONSENT">DIRECT_CONSENT — Direct candidate consent confirmed</option>
+                      <option value="PENDING_REVIEW">PENDING_REVIEW — Not yet verified (Blocks outreach drafts)</option>
+                      <option value="UNVERIFIED">UNVERIFIED — Ambiguous or unverified source</option>
+                      <option value="OPTED_OUT">OPTED_OUT — Candidate requested suppression</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Email Verification Status
+                    </label>
+                    <select
+                      value={permEmailStatus}
+                      onChange={(e) => setPermEmailStatus(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="VERIFIED">VERIFIED — Valid and active email</option>
+                      <option value="PENDING_VERIFICATION">PENDING_VERIFICATION — Extracted but unverified</option>
+                      <option value="INVALID">INVALID — Bounced, invalid format or missing</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Reviewer Name / ID
+                    </label>
+                    <input
+                      type="text"
+                      value={permReviewer}
+                      onChange={(e) => setPermReviewer(e.target.value)}
+                      placeholder="e.g. Recruiter Lead or Staff Recruiter"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Audit Notes & Evidence
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={permNotes}
+                      onChange={(e) => setPermNotes(e.target.value)}
+                      placeholder="e.g. Verified candidate resume submitted directly via recruitment intake / portfolio consent."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setPermissionCandidate(null)}
+                    className="px-4 py-2 rounded-lg text-xs text-slate-400 hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSavePermission}
+                    disabled={savingPermission}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-all"
+                  >
+                    {savingPermission ? <RefreshCw className="animate-spin" size={14} /> : <Check size={14} />}
+                    Save Permission Audit
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -855,7 +1166,12 @@ export const CvOutreachView: React.FC = () => {
       {activeTab === 'opportunities' && (
         <div className="space-y-6">
           <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-white">Managed Partner Opportunities</h2>
+            <div>
+              <h2 className="text-base font-semibold text-white">Managed Partner Opportunities</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Every opportunity must be audited and verified before outreach drafts can be created.
+              </p>
+            </div>
             <button
               onClick={() => setShowAddOppModal(true)}
               className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-all"
@@ -875,6 +1191,10 @@ export const CvOutreachView: React.FC = () => {
                       className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                         opp.verification_status === 'VERIFIED'
                           ? 'bg-emerald-500/20 text-emerald-300'
+                          : opp.verification_status === 'UNDER_REVIEW'
+                          ? 'bg-blue-500/20 text-blue-300'
+                          : opp.verification_status === 'EXPIRED_INACTIVE'
+                          ? 'bg-rose-500/20 text-rose-300'
                           : 'bg-amber-500/20 text-amber-300'
                       }`}
                     >
@@ -892,23 +1212,48 @@ export const CvOutreachView: React.FC = () => {
                   <div className="text-xs text-slate-300">
                     <span className="text-slate-500">Min Exp:</span> {opp.experience_years_min}+ years · {opp.location_restrictions}
                   </div>
-                  {opp.links && opp.links.length > 0 && (
-                    <div className="text-xs text-indigo-300 truncate">
-                      <span className="text-slate-500">Verified Referral URL:</span>{' '}
-                      <a href={opp.links[0].url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-200">
-                        {opp.links[0].url}
+
+                  {/* Official URL */}
+                  {opp.official_url && (
+                    <div className="text-xs text-slate-300 truncate">
+                      <span className="text-slate-500">Official Portal:</span>{' '}
+                      <a href={opp.official_url} target="_blank" rel="noreferrer" className="underline hover:text-indigo-300">
+                        {opp.official_url}
                       </a>
                     </div>
                   )}
-                  {opp.verification_status !== 'VERIFIED' && (
-                    <button
-                      onClick={() => handleVerifyOpportunity(opp.id)}
-                      className="mt-2 w-full py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border border-emerald-700 bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 transition-all"
-                    >
-                      <ShieldCheck size={14} />
-                      Verify Opportunity
-                    </button>
+
+                  {/* Referral URL */}
+                  {(opp.referral_url || (opp.links && opp.links.length > 0)) && (
+                    <div className="text-xs text-indigo-300 truncate">
+                      <span className="text-slate-500">Referral Link:</span>{' '}
+                      <a
+                        href={opp.referral_url || (opp.links ? opp.links[0]?.url : '#')}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline hover:text-indigo-200"
+                      >
+                        {opp.referral_url || (opp.links ? opp.links[0]?.url : '')}
+                      </a>
+                    </div>
                   )}
+
+                  {/* Verification Audit Info */}
+                  {opp.verified_by && (
+                    <div className="text-[11px] text-slate-400 pt-1">
+                      Verified by <strong className="text-slate-300">{opp.verified_by}</strong>
+                      {opp.verified_at && ` (${new Date(opp.verified_at).toLocaleDateString()})`}
+                      {opp.verification_notes && `: "${opp.verification_notes}"`}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => openOppVerifyModal(opp)}
+                    className="mt-2 w-full py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border border-indigo-700 bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-300 transition-all"
+                  >
+                    <ShieldCheck size={14} />
+                    Audit & Verify Opportunity
+                  </button>
                 </div>
               </div>
             ))}
@@ -950,6 +1295,16 @@ export const CvOutreachView: React.FC = () => {
                     />
                   </div>
                   <div>
+                    <label className="text-xs text-slate-400">Referral Link URL (Optional)</label>
+                    <input
+                      type="text"
+                      value={newOppReferralUrl}
+                      onChange={(e) => setNewOppReferralUrl(e.target.value)}
+                      placeholder="https://.../?ref=..."
+                      className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white"
+                    />
+                  </div>
+                  <div>
                     <label className="text-xs text-slate-400">Required Skills (comma separated)</label>
                     <input
                       type="text"
@@ -972,6 +1327,84 @@ export const CvOutreachView: React.FC = () => {
                     className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded text-xs font-semibold"
                   >
                     Create Opportunity
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Verify Opportunity Modal */}
+          {verifyingOpp && (
+            <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
+              <div className="bg-slate-850 border border-slate-700 rounded-xl p-6 max-w-lg w-full space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <ShieldCheck size={18} className="text-indigo-400" />
+                    Audit Opportunity: {verifyingOpp.platform} - {verifyingOpp.title}
+                  </h3>
+                  <button onClick={() => setVerifyingOpp(null)} className="text-slate-400 hover:text-white">
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="space-y-3.5 text-xs">
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Verification Status
+                    </label>
+                    <select
+                      value={oppStatus}
+                      onChange={(e) => setOppStatus(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="VERIFIED">VERIFIED — Program active & referral link confirmed</option>
+                      <option value="UNDER_REVIEW">UNDER_REVIEW — In review / pending documentation</option>
+                      <option value="UNVERIFIED">UNVERIFIED — Unconfirmed program (Blocks outreach drafts)</option>
+                      <option value="EXPIRED_INACTIVE">EXPIRED_INACTIVE — Role closed or program expired</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Verification Source
+                    </label>
+                    <input
+                      type="text"
+                      value={oppSource}
+                      onChange={(e) => setOppSource(e.target.value)}
+                      placeholder="e.g. Official partner documentation / platform affiliate portal"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-400 font-semibold uppercase tracking-wider block mb-1">
+                      Verification Notes & Audit Trail
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={oppNotes}
+                      onChange={(e) => setOppNotes(e.target.value)}
+                      placeholder="e.g. Audited live job listing on official career site; referral mechanism validated."
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setVerifyingOpp(null)}
+                    className="px-4 py-2 rounded-lg text-xs text-slate-400 hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveOppVerification}
+                    disabled={savingOppVerification}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-all"
+                  >
+                    {savingOppVerification ? <RefreshCw className="animate-spin" size={14} /> : <Check size={14} />}
+                    Save Verification
                   </button>
                 </div>
               </div>
@@ -1035,104 +1468,165 @@ export const CvOutreachView: React.FC = () => {
                 No candidate matches found matching the criteria. Click "Re-Evaluate Matches" to compute match scores.
               </div>
             ) : (
-              matches.map((m) => (
-                <div key={m.id} className="bg-slate-850 border border-slate-750 p-5 rounded-xl space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-bold text-white">{m.candidate_name}</span>
-                        <span className="text-xs text-slate-400">→</span>
-                        <span className="text-sm font-semibold text-indigo-400">
-                          {m.opportunity_platform}: {m.opportunity_title}
-                        </span>
-                      </div>
-                      <div className="text-xs text-slate-400 mt-0.5">
-                        {m.candidate_email || 'No email'} · {m.candidate_location || 'Unknown location'}
-                      </div>
-                    </div>
+              matches.map((m) => {
+                const isEligible = m.outreach_eligibility === 'ELIGIBLE';
+                const isBlocked = m.outreach_eligibility === 'BLOCKED';
 
-                    <div className="flex items-center gap-3">
-                      <div className="text-right">
-                        <div className="text-xl font-extrabold text-white">{m.score}/100</div>
-                        <div
-                          className={`text-[10px] font-bold uppercase ${
-                            m.recommendation === 'Eligible for Outreach'
-                              ? 'text-emerald-400'
-                              : m.recommendation === 'Review'
-                              ? 'text-amber-400'
-                              : 'text-rose-400'
-                          }`}
-                        >
-                          {m.recommendation}
+                return (
+                  <div key={m.id} className="bg-slate-850 border border-slate-750 p-5 rounded-xl space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-bold text-white">{m.candidate_name}</span>
+                          <span className="text-xs text-slate-400">→</span>
+                          <span className="text-sm font-semibold text-indigo-400">
+                            {m.opportunity_platform}: {m.opportunity_title}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-400 mt-0.5">
+                          {m.candidate_email || 'No email'} · {m.candidate_location || 'Unknown location'}
                         </div>
                       </div>
 
-                      <button
-                        onClick={() => handleGenerateDraftFromMatch(m)}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
-                      >
-                        <Mail size={13} />
-                        Prepare Draft
-                      </button>
-                    </div>
-                  </div>
+                      <div className="flex items-center gap-3">
+                        {/* Fit Score & Outreach Status */}
+                        <div className="text-right">
+                          <div className="text-xl font-extrabold text-white">{m.score}/100</div>
+                          <div
+                            className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border inline-block mt-0.5 ${
+                              isEligible
+                                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/50'
+                                : isBlocked
+                                ? 'bg-rose-950/60 text-rose-300 border-rose-700/50'
+                                : 'bg-amber-950/60 text-amber-300 border-amber-700/50'
+                            }`}
+                          >
+                            {m.outreach_eligibility || m.recommendation}
+                          </div>
+                        </div>
 
-                  {/* Score Breakdown Pills */}
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center text-xs">
-                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                      <span className="text-slate-400 block text-[11px]">Skills</span>
-                      <span className="font-bold text-slate-200">{m.score_breakdown.skills_score}/40</span>
+                        <button
+                          onClick={() => handleGenerateDraftFromMatch(m)}
+                          className="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+                        >
+                          <Mail size={13} />
+                          Prepare Draft
+                        </button>
+                      </div>
                     </div>
-                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                      <span className="text-slate-400 block text-[11px]">Experience</span>
-                      <span className="font-bold text-slate-200">{m.score_breakdown.experience_score}/25</span>
-                    </div>
-                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                      <span className="text-slate-400 block text-[11px]">Language</span>
-                      <span className="font-bold text-slate-200">{m.score_breakdown.language_score}/15</span>
-                    </div>
-                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                      <span className="text-slate-400 block text-[11px]">Location</span>
-                      <span className="font-bold text-slate-200">{m.score_breakdown.location_score}/10</span>
-                    </div>
-                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                      <span className="text-slate-400 block text-[11px]">Other</span>
-                      <span className="font-bold text-slate-200">{m.score_breakdown.other_score}/10</span>
-                    </div>
-                  </div>
 
-                  {/* Skills tags */}
-                  <div className="space-y-1.5 text-xs">
-                    {m.matched_requirements.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-slate-400">Matched Skills:</span>
-                        {m.matched_requirements.map((s, i) => (
-                          <span key={i} className="bg-emerald-950/40 border border-emerald-800/40 text-emerald-300 px-2 py-0.5 rounded text-[11px]">
-                            {s}
-                          </span>
-                        ))}
+                    {/* Score Breakdown Pills */}
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center text-xs">
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                        <span className="text-slate-400 block text-[11px]">Skills</span>
+                        <span className="font-bold text-slate-200">{m.score_breakdown.skills_score}/40</span>
                       </div>
-                    )}
-                    {m.missing_requirements.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-slate-400">Missing Requirements:</span>
-                        {m.missing_requirements.map((s, i) => (
-                          <span key={i} className="bg-amber-950/40 border border-amber-800/40 text-amber-300 px-2 py-0.5 rounded text-[11px]">
-                            {s}
-                          </span>
-                        ))}
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                        <span className="text-slate-400 block text-[11px]">Experience</span>
+                        <span className="font-bold text-slate-200">{m.score_breakdown.experience_score}/25</span>
                       </div>
-                    )}
-                    {m.contradictions.length > 0 && (
-                      <div className="text-rose-400">
-                        Notice: {m.contradictions.join('; ')}
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                        <span className="text-slate-400 block text-[11px]">Language</span>
+                        <span className="font-bold text-slate-200">{m.score_breakdown.language_score}/15</span>
                       </div>
-                    )}
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                        <span className="text-slate-400 block text-[11px]">Location</span>
+                        <span className="font-bold text-slate-200">{m.score_breakdown.location_score}/10</span>
+                      </div>
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                        <span className="text-slate-400 block text-[11px]">Other</span>
+                        <span className="font-bold text-slate-200">{m.score_breakdown.other_score}/10</span>
+                      </div>
+                    </div>
+
+                    {/* Skills tags & Gating notes */}
+                    <div className="space-y-1.5 text-xs">
+                      {m.matched_requirements.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-slate-400">Matched Skills:</span>
+                          {m.matched_requirements.map((s, i) => (
+                            <span key={i} className="bg-emerald-950/40 border border-emerald-800/40 text-emerald-300 px-2 py-0.5 rounded text-[11px]">
+                              {s}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {m.missing_requirements.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-slate-400">Missing Requirements:</span>
+                          {m.missing_requirements.map((s, i) => (
+                            <span key={i} className="bg-amber-950/40 border border-amber-800/40 text-amber-300 px-2 py-0.5 rounded text-[11px]">
+                              {s}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {m.contradictions.length > 0 && (
+                        <div className="text-rose-400">
+                          Notice: {m.contradictions.join('; ')}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
+
+          {/* Blocked Draft Warning Modal */}
+          {blockedWarning && (
+            <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
+              <div className="bg-slate-850 border border-amber-500/40 rounded-xl p-6 max-w-lg w-full space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h3 className="text-base font-bold text-amber-300 flex items-center gap-2">
+                    <ShieldAlert size={20} className="text-amber-400" />
+                    Draft Blocked by Compliance Gating
+                  </h3>
+                  <button onClick={() => setBlockedWarning(null)} className="text-slate-400 hover:text-white">
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <p className="text-slate-300">
+                    A Gmail draft cannot be generated for <strong className="text-white">{blockedWarning.candidateName}</strong> for{' '}
+                    <strong className="text-indigo-300">{blockedWarning.opportunityTitle}</strong> until all prerequisites are satisfied:
+                  </p>
+
+                  <ul className="list-disc list-inside space-y-1.5 text-rose-300 bg-slate-900/80 p-3 rounded-lg border border-slate-800">
+                    {blockedWarning.reasons.map((r, i) => (
+                      <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+
+                  <p className="text-slate-400">
+                    To maintain strict candidate privacy, contact permissions must be explicitly approved in the CV Library and referral opportunities must be verified in the Opportunities tab.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                  <button
+                    onClick={() => setBlockedWarning(null)}
+                    className="px-4 py-2 rounded-lg text-xs text-slate-400 hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                  {blockedWarning.suggestedTab && (
+                    <button
+                      onClick={() => {
+                        const tab = blockedWarning.suggestedTab!;
+                        setBlockedWarning(null);
+                        setActiveTab(tab);
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-xs font-semibold"
+                    >
+                      Go to {blockedWarning.suggestedTab === 'opportunities' ? 'Opportunities' : 'CV Library'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1208,13 +1702,21 @@ export const CvOutreachView: React.FC = () => {
                             ? 'bg-emerald-500/20 text-emerald-300'
                             : d.status === 'SIMULATED_DRAFT'
                             ? 'bg-sky-500/20 text-sky-300'
-                            : 'bg-amber-500/20 text-amber-300'
+                            : d.status === 'CREATING'
+                            ? 'bg-indigo-500/20 text-indigo-300 animate-pulse'
+                            : d.status === 'SENT_MANUALLY'
+                            ? 'bg-purple-500/20 text-purple-300'
+                            : 'bg-rose-500/20 text-rose-300'
                         }`}
                       >
                         {d.status === 'CREATED_IN_GMAIL'
                           ? 'Live Gmail Draft'
                           : d.status === 'SIMULATED_DRAFT'
                           ? 'Simulated Draft'
+                          : d.status === 'CREATING'
+                          ? 'Creating in Background...'
+                          : d.status === 'SENT_MANUALLY'
+                          ? 'Sent Manually'
                           : d.status}
                       </span>
                       {d.gmail_draft_id && (

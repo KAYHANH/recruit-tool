@@ -604,8 +604,8 @@ export const api = {
     return handleResponse(res);
   },
 
-  async retryImportJob(jobId: string, batchSize: number = 15): Promise<{ success: boolean; job_id: string; message: string }> {
-    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/retry?batch_size=${batchSize}`, {
+  async retryImportJob(jobId: string, batchSize: number = 15, runAsync: boolean = true): Promise<{ success: boolean; job_id: string; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/cv-import/jobs/${jobId}/retry?batch_size=${batchSize}&run_async=${runAsync}`, {
       method: 'POST',
     });
     return handleResponse(res);
@@ -635,15 +635,39 @@ export const api = {
     return handleResponse(res);
   },
 
-  async setCandidatePermissionBasis(candidateId: number, permissionBasis: string): Promise<{
+  async setCandidatePermissionBasis(
+    candidateId: number,
+    permissionBasis: string,
+    reviewer: string = 'Recruiter',
+    notes: string = ''
+  ): Promise<{
     success: boolean;
     candidate_id: number;
     permission_basis: string;
+    reviewer?: string;
+    notes?: string;
   }> {
     const res = await fetch(`${BASE_URL}/api/referrals/candidates/${candidateId}/permission`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ permission_basis: permissionBasis }),
+      body: JSON.stringify({ permission_basis: permissionBasis, reviewer, notes }),
+    });
+    return handleResponse(res);
+  },
+
+  async setCandidateEmailVerification(
+    candidateId: number,
+    status: string,
+    notes: string = ''
+  ): Promise<{
+    success: boolean;
+    candidate_id: number;
+    status: string;
+  }> {
+    const res = await fetch(`${BASE_URL}/api/referrals/candidates/${candidateId}/email-verification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, notes }),
     });
     return handleResponse(res);
   },

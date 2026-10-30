@@ -111,8 +111,8 @@ class CVDeduplicator:
                             conn,
                             parsed,
                             notes=f"Ambiguous name match with Candidate #{existing_same_name['id']} ('{existing_same_name.get('name')}') - separated due to distinct email.",
-                            status="Needs Review",
-                            permission_basis="unverified_ambiguous",
+                            status="AMBIGUOUS_REVIEW",
+                            permission_basis="UNVERIFIED",
                         )
                 elif not parsed.normalized_email or not existing_same_name.get("email"):
                     # One or both lack verified email - flag for ambiguity review
@@ -124,8 +124,8 @@ class CVDeduplicator:
                         conn,
                         parsed,
                         notes=f"Ambiguous identity: Same name as existing Candidate #{existing_same_name['id']} ('{existing_same_name.get('name')}'), but email is unverified on one or both records. Recruiter manual review required.",
-                        status="Needs Review",
-                        permission_basis="unverified_ambiguous",
+                        status="AMBIGUOUS_REVIEW",
+                        permission_basis="UNVERIFIED",
                     )
 
         # 4. Level 4: Create Brand New Candidate Record
@@ -197,7 +197,7 @@ class CVDeduplicator:
         parsed: ParsedCV,
         notes: str = "",
         status: str = "New",
-        permission_basis: str = "public_cv",
+        permission_basis: str = "PENDING_REVIEW",
     ) -> DeduplicationResult:
         """Inserts a brand new canonical candidate and associated candidate_file."""
         now_iso = datetime.now().isoformat(timespec="seconds")
@@ -211,15 +211,17 @@ class CVDeduplicator:
         skills_json = json.dumps(parsed.skills)
         langs_json = json.dumps(parsed.languages)
 
+        email_status = "PENDING_VERIFICATION" if norm_email and "@" in norm_email else "INVALID"
+
         cur = conn.execute(
             """INSERT INTO candidates(
                 name, profile_url, headline, location, experience, source,
                 evidence_text, notes, created_at, status, email, phone,
                 normalized_email, skills, languages, years_of_experience,
-                contact_permission_basis, opt_out_status, suppression_reason,
+                contact_permission_basis, email_verification_status, opt_out_status, suppression_reason,
                 resume_text, resume_filename, resume_source, resume_uploaded_at,
                 added_by, evidence_ladder_tier
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, 'CV Upload', ?, 'Bulk CV Importer', 'Tier 1: Document CV')""",
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, 'CV Upload', ?, 'Bulk CV Importer', 'Tier 1: Document CV')""",
             (
                 name,
                 f"file://local-cv/{parsed.file_hash[:12]}",
@@ -238,6 +240,7 @@ class CVDeduplicator:
                 langs_json,
                 parsed.years_of_experience,
                 permission_basis,
+                email_status,
                 parsed.cleaned_text[:4000],
                 parsed.file_name,
                 now_iso,

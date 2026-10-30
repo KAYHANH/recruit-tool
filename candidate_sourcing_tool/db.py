@@ -121,7 +121,11 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
         _add_column_if_missing(conn, "candidates", "normalized_email", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "candidates", "skills", "TEXT DEFAULT '[]'")
         _add_column_if_missing(conn, "candidates", "languages", "TEXT DEFAULT '[]'")
-        _add_column_if_missing(conn, "candidates", "contact_permission_basis", "TEXT DEFAULT 'public_cv'")
+        _add_column_if_missing(conn, "candidates", "contact_permission_basis", "TEXT DEFAULT 'PENDING_REVIEW'")
+        _add_column_if_missing(conn, "candidates", "permission_reviewed_by", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidates", "permission_reviewed_at", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidates", "permission_notes", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidates", "email_verification_status", "TEXT DEFAULT 'PENDING_VERIFICATION'")
         _add_column_if_missing(conn, "candidates", "opt_out_status", "INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "candidates", "suppression_reason", "TEXT DEFAULT ''")
         _add_column_if_missing(conn, "candidates", "last_contacted_at", "TEXT DEFAULT ''")
@@ -369,10 +373,23 @@ def init_db(db_path: Path | str) -> sqlite3.Connection:
             FOREIGN KEY(opportunity_id) REFERENCES referral_opportunities(id)
         )""")
 
+        _add_column_if_missing(conn, "referral_opportunities", "official_url", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "referral_opportunities", "referral_url", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "referral_opportunities", "eligibility_criteria", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "referral_opportunities", "verified_by", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "referral_opportunities", "verified_at", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "referral_opportunities", "expiry_date", "TEXT DEFAULT ''")
+        _add_column_if_missing(conn, "candidate_opportunity_matches", "outreach_eligibility", "TEXT DEFAULT 'PENDING_REVIEW'")
+        _add_column_if_missing(conn, "referral_outreach_drafts", "creation_locked", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, "referral_outreach_drafts", "error_message", "TEXT DEFAULT ''")
+
     seed_candidate_experiences_if_empty(conn)
     seed_default_opportunities_if_empty(conn)
     # Normalize legacy Groq Web Search labels to canonical Groq Browser Search
     conn.execute("UPDATE candidates SET source = 'Groq Browser Search' WHERE source LIKE 'Groq Web Search%'")
+    # Normalize legacy permission and status
+    conn.execute("UPDATE candidates SET contact_permission_basis = 'PENDING_REVIEW' WHERE contact_permission_basis IN ('public_cv', '', 'unverified_ambiguous')")
+    conn.execute("UPDATE referral_opportunities SET verification_status = 'UNVERIFIED' WHERE verification_source LIKE '%Developer Network Public Jobs%' OR verification_notes LIKE '%developer network program%'")
     conn.commit()
     return conn
 
@@ -1916,10 +1933,48 @@ def update_candidate_contact_permission(
     conn: sqlite3.Connection,
     candidate_id: int,
     permission_basis: str,
+    reviewer: str = "Recruiter",
+    notes: str = "",
 ) -> None:
+    allowed_bases = {"PENDING_REVIEW", "UNVERIFIED", "APPROVED_OUTREACH", "DIRECT_CONSENT", "OPTED_OUT"}
+    norm_basis = permission_basis.strip().upper()
+    if norm_basis not in allowed_bases:
+        raise ValueError(f"Invalid permission basis '{permission_basis}'. Must be one of: {', '.join(sorted(allowed_bases))}")
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    if norm_basis == "OPTED_OUT":
+        conn.execute(
+            """UPDATE candidates
+            SET contact_permission_basis = ?, permission_reviewed_by = ?, permission_reviewed_at = ?, permission_notes = ?,
+                opt_out_status = 1, suppression_reason = ?
+            WHERE id = ?""",
+            (norm_basis, reviewer, now_iso, notes, notes or "Marked OPTED_OUT via permission management", candidate_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE candidates
+            SET contact_permission_basis = ?, permission_reviewed_by = ?, permission_reviewed_at = ?, permission_notes = ?,
+                opt_out_status = 0
+            WHERE id = ?""",
+            (norm_basis, reviewer, now_iso, notes, candidate_id),
+        )
+    conn.commit()
+
+
+def update_candidate_email_verification(
+    conn: sqlite3.Connection,
+    candidate_id: int,
+    status: str,
+    notes: str = "",
+) -> None:
+    allowed_statuses = {"EXTRACTED", "PENDING_VERIFICATION", "VERIFIED", "INVALID"}
+    norm_status = status.strip().upper()
+    if norm_status not in allowed_statuses:
+        raise ValueError(f"Invalid email verification status '{status}'. Must be one of: {', '.join(sorted(allowed_statuses))}")
+
     conn.execute(
-        "UPDATE candidates SET contact_permission_basis = ? WHERE id = ?",
-        (permission_basis, candidate_id),
+        "UPDATE candidates SET email_verification_status = ? WHERE id = ?",
+        (norm_status, candidate_id),
     )
     conn.commit()
 
@@ -1942,7 +1997,7 @@ def update_candidate_opt_out(
 # ---------------------------------------------------------------------------
 
 def seed_default_opportunities_if_empty(conn: sqlite3.Connection) -> None:
-    """Seeds verified initial opportunities for Turing, Mercor, and micro1 if table is empty."""
+    """Seeds unverified initial opportunities for Turing, Mercor, and micro1 if table is empty."""
     count = conn.execute("SELECT count(*) FROM referral_opportunities").fetchone()[0]
     if count > 0:
         return
@@ -1958,10 +2013,10 @@ def seed_default_opportunities_if_empty(conn: sqlite3.Connection) -> None:
             "Remote (Global)",
             json.dumps(["English"]),
             3,
-            "VERIFIED",
+            "UNVERIFIED",
             now_iso,
             "Turing Developer Network Public Jobs",
-            "Verified developer network program offering verified remote developer engagements.",
+            "Unverified initial role description. Recruiter verification required before outreach.",
             1,
             now_iso,
             "https://turing.com/referrals/dev-portal",
@@ -1975,10 +2030,10 @@ def seed_default_opportunities_if_empty(conn: sqlite3.Connection) -> None:
             "Remote (Global)",
             json.dumps(["English"]),
             2,
-            "VERIFIED",
+            "UNVERIFIED",
             now_iso,
             "Mercor AI Platform Public Documentation",
-            "Direct AI specialist platform matching top technical talent with silicon valley AI projects.",
+            "Unverified initial role description. Recruiter verification required before outreach.",
             1,
             now_iso,
             "https://mercor.com/apply/ai-engineer",
@@ -1992,10 +2047,10 @@ def seed_default_opportunities_if_empty(conn: sqlite3.Connection) -> None:
             "Remote (Global)",
             json.dumps(["English"]),
             3,
-            "VERIFIED",
+            "UNVERIFIED",
             now_iso,
             "micro1 Talent Network Portal",
-            "Verified global developer network connecting vetted talent with US & European clients.",
+            "Unverified initial role description. Recruiter verification required before outreach.",
             1,
             now_iso,
             "https://micro1.ai/talents/apply",
@@ -2174,7 +2229,8 @@ def save_candidate_match(
     missing_requirements: list[str],
     contradictions: list[str],
     recommendation: str,
-    opportunity_verification_status: str = "VERIFIED",
+    opportunity_verification_status: str = "UNVERIFIED",
+    outreach_eligibility: str = "PENDING_REVIEW",
     reviewer_decision: str = "PENDING",
     reviewer_notes: str = "",
 ) -> int:
@@ -2183,9 +2239,9 @@ def save_candidate_match(
         """INSERT INTO candidate_opportunity_matches(
             candidate_id, opportunity_id, score, score_breakdown, evidence,
             matched_requirements, missing_requirements, contradictions,
-            recommendation, opportunity_verification_status, reviewer_decision,
+            recommendation, opportunity_verification_status, outreach_eligibility, reviewer_decision,
             reviewer_notes, created_at, updated_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_id, opportunity_id) DO UPDATE SET
             score = excluded.score,
             score_breakdown = excluded.score_breakdown,
@@ -2195,6 +2251,7 @@ def save_candidate_match(
             contradictions = excluded.contradictions,
             recommendation = excluded.recommendation,
             opportunity_verification_status = excluded.opportunity_verification_status,
+            outreach_eligibility = excluded.outreach_eligibility,
             updated_at = excluded.updated_at""",
         (
             candidate_id,
@@ -2207,6 +2264,7 @@ def save_candidate_match(
             json.dumps(contradictions),
             recommendation,
             opportunity_verification_status,
+            outreach_eligibility,
             reviewer_decision,
             reviewer_notes,
             now_iso,
@@ -2233,6 +2291,9 @@ def list_candidate_matches(
             c.location as candidate_location,
             c.opt_out_status as candidate_opt_out,
             c.contact_permission_basis as candidate_permission_basis,
+            c.email_verification_status as candidate_email_verification_status,
+            c.permission_reviewed_by,
+            c.permission_reviewed_at,
             o.platform as opportunity_platform,
             o.title as opportunity_title,
             o.verification_status as opp_verification_status

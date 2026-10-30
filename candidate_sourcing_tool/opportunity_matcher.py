@@ -42,6 +42,7 @@ class MatchResult:
     unknowns: list[str]
     evidence: dict[str, Any]
     recommendation: str  # "Eligible for Outreach", "Review", "Do Not Proceed"
+    outreach_eligibility: str  # "ELIGIBLE", "PENDING_REVIEW", "BLOCKED"
     reason: str
 
 
@@ -160,31 +161,47 @@ class OpportunityMatcher:
             loc_score = 5
             unknowns.append(f"Specific geographic location and work authorization unknown for '{opportunity.get('location_restrictions')}'.")
 
-        # 5. Other Explicit Requirements & Verification Quality (Max 10 points)
-        ver_score = 5 if opp_ver_status == "VERIFIED" else 2
-        if opp_ver_status != "VERIFIED":
-            eligibility_concerns.append("Opportunity verification status is UNVERIFIED; human confirmation required before outreach.")
-
-        # Additional 5 points based on candidate permission and explicit criteria
-        perm = (candidate.get("contact_permission_basis") or "").lower()
-        perm_score = 5 if perm in ("approved_outreach", "direct_consent", "verified_permission", "public_cv_approved") else (3 if perm == "public_cv" else 1)
-        other_score = ver_score + perm_score
+        # 5. Other Explicit Job Requirements (Max 10 points) - Pure role fit
+        other_score = 10
+        if opp_reqs and len(cand_skills) < 2:
+            other_score = 5
+            unknowns.append("Candidate demonstrates limited breadth across secondary technical tools.")
 
         total_score = min(100, skills_score + exp_score + lang_score + loc_score + other_score)
 
-        # Recommendation
-        if candidate.get("opt_out_status", 0) == 1:
+        # Independent Outreach Eligibility Gates (Strictly decoupled from role fit score)
+        is_opted_out = candidate.get("opt_out_status", 0) == 1
+        cand_perm = (candidate.get("contact_permission_basis") or "").strip().upper()
+        email_status = (candidate.get("email_verification_status") or "").strip().upper()
+        email_addr = (candidate.get("email") or "").strip()
+        has_valid_email = bool(email_addr and "@" in email_addr and "." in email_addr.split("@")[-1])
+        is_opp_verified = (opp_ver_status == "VERIFIED")
+
+        unmet_gates: list[str] = []
+        if is_opted_out:
+            unmet_gates.append(f"Candidate opted out ({candidate.get('suppression_reason') or 'Suppressed'})")
+        if cand_perm not in ("APPROVED_OUTREACH", "DIRECT_CONSENT"):
+            unmet_gates.append(f"Contact permission is '{cand_perm or 'PENDING_REVIEW'}' (Approval required)")
+        if not has_valid_email or email_status == "INVALID":
+            unmet_gates.append("Valid recipient email address missing or unverified")
+        if not is_opp_verified:
+            unmet_gates.append(f"Opportunity verification status is '{opp_ver_status}' (Admin audit required)")
+        if total_score < 40:
+            unmet_gates.append(f"Role fit score ({total_score}/100) below minimum matching threshold (40)")
+
+        # Determine Outreach Eligibility & Human Recommendation
+        if is_opted_out or total_score < 40 or not has_valid_email or email_status == "INVALID":
+            outreach_eligibility = "BLOCKED"
             recommendation = "Do Not Proceed"
-            reason = f"Candidate has opted out of outreach (Reason: {candidate.get('suppression_reason', 'Opted-out')})."
-        elif total_score >= 65 and opp_ver_status == "VERIFIED" and not eligibility_concerns:
-            recommendation = "Eligible for Outreach"
-            reason = f"Strong match ({total_score}/100) with {len(matched_skills)} verified skills and qualified experience."
-        elif total_score >= 40:
+            reason = f"Outreach blocked: {'; '.join(unmet_gates)}"
+        elif unmet_gates:
+            outreach_eligibility = "PENDING_REVIEW"
             recommendation = "Review"
-            reason = f"Moderate match ({total_score}/100). Review missing requirements ({', '.join(missing_skills[:3]) if missing_skills else 'None'}) before creating draft."
+            reason = f"Role fit {total_score}/100. Outreach pending: {'; '.join(unmet_gates)}"
         else:
-            recommendation = "Do Not Proceed"
-            reason = f"Low relevance score ({total_score}/100). Insufficient skill or experience overlap."
+            outreach_eligibility = "ELIGIBLE"
+            recommendation = "Eligible for Outreach"
+            reason = f"Strong qualification ({total_score}/100) with verified opportunity and approved contact permission."
 
         breakdown = {
             "skills_score": skills_score,
@@ -206,6 +223,8 @@ class OpportunityMatcher:
             "candidate_headline": candidate.get("headline") or "",
             "opportunity_title": opportunity.get("title"),
             "opportunity_platform": opportunity.get("platform"),
+            "outreach_eligibility": outreach_eligibility,
+            "unmet_gates": unmet_gates,
         }
 
         return MatchResult(
@@ -219,6 +238,7 @@ class OpportunityMatcher:
             unknowns=unknowns,
             evidence=evidence_payload,
             recommendation=recommendation,
+            outreach_eligibility=outreach_eligibility,
             reason=reason,
         )
 
@@ -236,7 +256,7 @@ class OpportunityMatcher:
             cand = dict(cand_row)
             for opp in opportunities:
                 res = self.evaluate_match(cand, opp)
-                if res.score >= min_score or res.recommendation != "Do Not Proceed":
+                if res.score >= min_score or res.outreach_eligibility != "BLOCKED":
                     save_candidate_match(
                         conn=conn,
                         candidate_id=res.candidate_id,
@@ -249,6 +269,7 @@ class OpportunityMatcher:
                         contradictions=res.eligibility_concerns,
                         recommendation=res.recommendation,
                         opportunity_verification_status=opp.get("verification_status", "UNVERIFIED"),
+                        outreach_eligibility=res.outreach_eligibility,
                     )
                     matched_count += 1
 

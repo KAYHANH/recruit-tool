@@ -152,6 +152,10 @@ app.add_middleware(
 
 # Connect to database and ensure migrations
 conn = init_db(DB_PATH)
+try:
+    cv_import_manager.recover_interrupted_jobs(conn)
+except Exception as _startup_exc:
+    logging.getLogger("api").warning("Startup job recovery notice: %s", _startup_exc)
 
 
 # --- Pydantic Models ---
@@ -1679,6 +1683,13 @@ class CandidateOptOutRequest(BaseModel):
 
 class CandidateContactPermissionRequest(BaseModel):
     permission_basis: str
+    reviewer: str = "Recruiter"
+    notes: str = ""
+
+
+class CandidateEmailVerificationRequest(BaseModel):
+    status: str
+    notes: str = ""
 
 
 @app.post("/api/cv-import/folder")
@@ -1717,20 +1728,41 @@ async def import_cvs_from_zip(
     batch_size: int = 15,
     run_async: bool = True,
 ) -> dict[str, Any]:
-    """Extracts a ZIP archive of CVs safely and processes them incrementally."""
+    """Extracts a ZIP archive of CVs safely and processes them incrementally using bounded disk streaming."""
     if not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Only .zip files are supported.")
 
-    content = await file.read()
-    if not content:
+    import tempfile
+    extract_dir = APP_DIR / "uploads" / "cv_zips"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stream upload in 64KB chunks to temporary file to avoid keeping large archive in memory
+    total_bytes = 0
+    max_allowed = 500 * 1024 * 1024  # 500MB
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=str(extract_dir)) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        try:
+            while chunk := await file.read(65536):
+                total_bytes += len(chunk)
+                if total_bytes > max_allowed:
+                    raise HTTPException(status_code=400, detail="Uploaded ZIP exceeds maximum limit of 500MB.")
+                tmp_file.write(chunk)
+            tmp_file.flush()
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+
+    if total_bytes == 0:
+        if tmp_path.exists():
+            tmp_path.unlink()
         raise HTTPException(status_code=400, detail="Uploaded ZIP file is empty.")
 
     conn = get_db()
     try:
-        extract_dir = APP_DIR / "uploads" / "cv_zips"
         job_id = cv_import_manager.start_zip_import(
             conn=conn,
-            zip_bytes=content,
+            zip_source=tmp_path,
             zip_filename=file.filename,
             extract_to_dir=extract_dir,
             batch_size=batch_size,
@@ -1746,6 +1778,12 @@ async def import_cvs_from_zip(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to process ZIP archive: {exc}")
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 @app.get("/api/cv-import/jobs")
@@ -1803,10 +1841,10 @@ def resume_import_job(job_id: str, batch_size: int = 15, run_async: bool = True)
 
 
 @app.post("/api/cv-import/jobs/{job_id}/retry")
-def retry_failed_import_files(job_id: str, batch_size: int = 15) -> dict[str, Any]:
-    """Retries failed or OCR-required files in a CV import job."""
+def retry_failed_import_files(job_id: str, batch_size: int = 15, run_async: bool = True) -> dict[str, Any]:
+    """Retries failed files in a CV import job (async by default)."""
     conn = get_db()
-    ok = cv_import_manager.retry_failed_files(conn, job_id, batch_size=batch_size)
+    ok = cv_import_manager.retry_failed_files(conn, job_id, batch_size=batch_size, run_async=run_async)
     if not ok:
         raise HTTPException(status_code=404, detail="Job not found or could not be retried.")
     return {"success": True, "job_id": job_id, "message": "Failed files queued for retry."}
@@ -1877,17 +1915,52 @@ def set_candidate_permission_basis(
     candidate_id: int,
     req: CandidateContactPermissionRequest,
 ) -> dict[str, Any]:
-    """Updates the documented contact permission basis for a candidate."""
+    """Updates the documented contact permission basis for a candidate with audit trail."""
     conn = get_db()
     cand = get_candidate(conn, candidate_id)
     if not cand:
         raise HTTPException(status_code=404, detail=f"Candidate #{candidate_id} not found.")
 
-    update_candidate_contact_permission(conn, candidate_id, req.permission_basis)
+    try:
+        update_candidate_contact_permission(
+            conn,
+            candidate_id,
+            req.permission_basis,
+            reviewer=req.reviewer,
+            notes=req.notes,
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
     return {
         "success": True,
         "candidate_id": candidate_id,
-        "permission_basis": req.permission_basis,
+        "permission_basis": req.permission_basis.upper(),
+        "reviewer": req.reviewer,
+        "notes": req.notes,
+    }
+
+
+@app.post("/api/referrals/candidates/{candidate_id}/email-verification")
+def set_candidate_email_verification(
+    candidate_id: int,
+    req: CandidateEmailVerificationRequest,
+) -> dict[str, Any]:
+    """Updates the verified status of a candidate's email address."""
+    conn = get_db()
+    cand = get_candidate(conn, candidate_id)
+    if not cand:
+        raise HTTPException(status_code=404, detail=f"Candidate #{candidate_id} not found.")
+
+    try:
+        update_candidate_email_verification(conn, candidate_id, req.status, notes=req.notes)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+
+    return {
+        "success": True,
+        "candidate_id": candidate_id,
+        "status": req.status.upper(),
     }
 
 
@@ -1999,11 +2072,8 @@ class VerifyOpportunityRequest(BaseModel):
 
 class OAuthCallbackRequest(BaseModel):
     code: str
+    state: str = ""
     redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback"
-
-
-class SaveTokenRequest(BaseModel):
-    token_data: dict[str, Any]
 
 
 @app.post("/api/referrals/opportunities/{opportunity_id}/verify")
@@ -2017,31 +2087,38 @@ def set_opportunity_verification(
     if not opp:
         raise HTTPException(status_code=404, detail=f"Opportunity #{opportunity_id} not found.")
 
-    now_iso = datetime.now().isoformat(timespec="seconds") if req.verification_status == "VERIFIED" else ""
+    allowed = {"UNVERIFIED", "UNDER_REVIEW", "VERIFIED", "EXPIRED_INACTIVE"}
+    v_status = req.verification_status.strip().upper()
+    if v_status not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid verification status '{req.verification_status}'. Must be one of: {', '.join(sorted(allowed))}")
+
+    now_iso = datetime.now().isoformat(timespec="seconds") if v_status == "VERIFIED" else ""
     update_referral_opportunity(
         conn,
         opportunity_id,
-        verification_status=req.verification_status,
+        verification_status=v_status,
         verification_source=req.verification_source,
         verification_notes=req.verification_notes,
         last_verified_at=now_iso,
     )
-    return {"success": True, "opportunity_id": opportunity_id, "verification_status": req.verification_status}
+    return {"success": True, "opportunity_id": opportunity_id, "verification_status": v_status}
 
 
 @app.get("/api/gmail/auth-url")
 def get_gmail_auth_url(redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback") -> dict[str, Any]:
-    """Generates the Google OAuth 2.0 authorization URL for draft creation."""
+    """Generates the Google OAuth 2.0 authorization URL for draft creation with state protection."""
     try:
-        auth_url = gmail_outreach.get_authorization_url(redirect_uri=redirect_uri)
-        return {"success": True, "auth_url": auth_url}
+        auth_url, state = gmail_outreach.get_authorization_url(redirect_uri=redirect_uri)
+        return {"success": True, "auth_url": auth_url, "state": state}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/gmail/oauth/callback")
 def handle_gmail_oauth_callback(req: OAuthCallbackRequest) -> dict[str, Any]:
-    """Exchanges OAuth authorization code for live tokens."""
+    """Exchanges OAuth authorization code for live tokens after validating state."""
+    if req.state and not gmail_outreach.validate_oauth_state(req.state):
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state parameter.")
     try:
         tokens = gmail_outreach.exchange_code_for_tokens(req.code, redirect_uri=req.redirect_uri)
         return {"success": True, "email": tokens.get("email"), "message": "Gmail OAuth successfully authenticated."}
@@ -2050,8 +2127,23 @@ def handle_gmail_oauth_callback(req: OAuthCallbackRequest) -> dict[str, Any]:
 
 
 @app.get("/api/gmail/oauth/callback")
-def handle_gmail_oauth_callback_get(code: str, redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback"):
+def handle_gmail_oauth_callback_get(
+    code: str,
+    state: str = "",
+    redirect_uri: str = "http://localhost:8000/api/gmail/oauth/callback",
+):
     """Handles browser redirect from Google OAuth consent screen."""
+    if state and not gmail_outreach.validate_oauth_state(state):
+        return HTMLResponse("""
+            <html>
+            <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f8fafc;">
+                <div style="max-width: 480px; margin: 40px auto; background: #1e293b; padding: 30px; border-radius: 16px; border: 1px solid #ef4444;">
+                    <h2 style="color: #f87171;">OAuth State Validation Failed</h2>
+                    <p style="color: #94a3b8;">Invalid or expired security state parameter. Please try connecting again.</p>
+                </div>
+            </body>
+            </html>
+        """, status_code=400)
     try:
         gmail_outreach.exchange_code_for_tokens(code, redirect_uri=redirect_uri)
         return HTMLResponse("""
@@ -2084,13 +2176,6 @@ def handle_gmail_oauth_callback_get(code: str, redirect_uri: str = "http://local
             </body>
             </html>
         """, status_code=400)
-
-
-@app.post("/api/gmail/save-token")
-def save_gmail_token_manual(req: SaveTokenRequest) -> dict[str, Any]:
-    """Manually saves or updates token dictionary."""
-    gmail_outreach.save_tokens(req.token_data)
-    return {"success": True, "message": "Token saved."}
 
 
 @app.post("/api/gmail/disconnect")

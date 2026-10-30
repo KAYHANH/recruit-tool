@@ -458,7 +458,11 @@ export interface ReferralCandidate extends Candidate {
   skills?: string[] | string;
   skills_list?: string[];
   languages?: string[];
-  contact_permission_basis?: string;
+  contact_permission_basis?: 'PENDING_REVIEW' | 'UNVERIFIED' | 'APPROVED_OUTREACH' | 'DIRECT_CONSENT' | 'OPTED_OUT' | string;
+  permission_reviewed_by?: string;
+  permission_reviewed_at?: string;
+  permission_notes?: string;
+  email_verification_status?: 'EXTRACTED' | 'PENDING_VERIFICATION' | 'VERIFIED' | 'INVALID' | string;
   opt_out_status?: number;
   suppression_reason?: string;
   last_contacted_at?: string;
@@ -472,6 +476,8 @@ export interface ReferralOpportunity {
   title: string;
   description: string;
   url: string;
+  official_url?: string;
+  referral_url?: string;
   requirements: string[];
   location_restrictions: string;
   language_requirements: string[];
@@ -480,6 +486,9 @@ export interface ReferralOpportunity {
   last_verified_at?: string;
   verification_source?: string;
   verification_notes?: string;
+  verified_by?: string;
+  verified_at?: string;
+  expiry_date?: string;
   links?: Array<{ id: number; url: string; owner_label: string; eligibility_notes?: string }>;
 }
 
@@ -492,6 +501,8 @@ export interface CandidateOpportunityMatch {
   candidate_phone?: string;
   candidate_location?: string;
   candidate_opt_out?: number;
+  candidate_permission_basis?: string;
+  candidate_email_verification_status?: string;
   opportunity_platform: string;
   opportunity_title: string;
   score: number;
@@ -506,6 +517,7 @@ export interface CandidateOpportunityMatch {
   missing_requirements: string[];
   contradictions: string[];
   recommendation: string;
+  outreach_eligibility?: 'ELIGIBLE' | 'PENDING_REVIEW' | 'BLOCKED' | string;
   opportunity_verification_status: string;
   reviewer_decision?: string;
   reviewer_notes?: string;

@@ -37,7 +37,7 @@ from jd_parser import clean_text
 
 logger = logging.getLogger("cv_parser")
 
-MAX_CV_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB max per CV file
+MAX_CV_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB max per CV file
 
 # Standard tech, AI/ML, operations, and generalist taxonomy for deterministic matching
 CORE_SKILLS_TAXONOMY = {
@@ -134,7 +134,7 @@ class CVParser:
 
         if file_size > MAX_CV_FILE_SIZE_BYTES:
             res.parsing_status = "FAILED"
-            res.error_message = f"File size exceeds maximum limit of 25MB ({file_size / (1024*1024):.1f}MB)."
+            res.error_message = f"File size exceeds maximum limit of 50MB ({file_size / (1024*1024):.1f}MB)."
             return res
 
         # Extract raw text depending on file format
@@ -149,9 +149,11 @@ class CVParser:
                 raw_text = self._extract_docx_text(content)
             elif file_ext in ("txt", "md", "text", "markdown"):
                 raw_text = self._extract_txt_text(content)
+            elif file_ext == "rtf":
+                raw_text = self._extract_rtf_text(content)
             else:
                 res.parsing_status = "FAILED"
-                res.error_message = f"Unsupported file extension: .{file_ext}. Supported formats: PDF, DOCX, TXT."
+                res.error_message = f"Unsupported file extension: .{file_ext}. Supported formats: PDF, DOCX, TXT, RTF."
                 return res
         except Exception as exc:
             logger.warning("Extraction error for file %s: %s", filename, exc)
@@ -239,6 +241,34 @@ class CVParser:
             except UnicodeDecodeError:
                 continue
         return content.decode("utf-8", errors="replace")
+
+    def _extract_rtf_text(self, content: bytes) -> str:
+        """Extracts plain text from Rich Text Format (RTF) documents without external dependencies."""
+        for enc in ("utf-8", "latin-1", "cp1252"):
+            try:
+                raw_str = content.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raw_str = content.decode("latin-1", errors="replace")
+
+        # 1. Remove font table, color table, stylesheet blocks
+        text = re.sub(r"{\\(fonttbl|colortbl|stylesheet)[^}]*}", "", raw_str)
+        # 2. Convert standard line break control words to newlines
+        text = re.sub(r"\\(par|line|row)(?:[\s\r\n]+|\b)", "\n", text)
+        text = re.sub(r"\\(tab)(?:[\s\r\n]+|\b)", "\t", text)
+        # 3. Replace hex character escapes like \'e9
+        def hex_repl(match):
+            try:
+                return bytes.fromhex(match.group(1)).decode("latin-1")
+            except Exception:
+                return ""
+        text = re.sub(r"\\'([0-9a-fA-F]{2})", hex_repl, text)
+        # 4. Remove all remaining control words and curly braces
+        text = re.sub(r"\\[a-zA-Z]+(-?[0-9]+)? ?", "", text)
+        text = re.sub(r"[{}]", "", text)
+        return text.strip()
 
     @staticmethod
     def extract_email(text: str) -> tuple[str, str]:
@@ -334,7 +364,7 @@ class CVParser:
     def extract_years_of_experience(text: str) -> int:
         """Extracts explicitly stated years of experience."""
         # e.g., "5+ years of experience", "8 years experience"
-        match = re.search(r"\b(\d{1,2})\+?\s*(?:years?|yrs?)(?:\s+of)?\s+(?:experience|exp)\b", text, re.IGNORECASE)
+        match = re.search(r"\b(\d{1,2})\+?\s*(?:years?|yrs?)(?:\s+of)?\s+(?:experience|exp|engineering|development|work)\b", text, re.IGNORECASE)
         if match:
             try:
                 val = int(match.group(1))
